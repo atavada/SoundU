@@ -3,8 +3,9 @@ import CSoundUDSP
 import Foundation
 import os
 
-/// The live audio graph for one output device: process taps, one private aggregate
-/// (the device plus the taps) and an IOProc that runs the C mixer. The aggregate's input
+/// The live audio graph on one output device: process taps, one private aggregate
+/// (the device plus the taps) and an IOProc that runs the C mixer. `AudioEngine` gives each
+/// app its own graph (one tap); the multi-tap paths stay general but are not used by it. The aggregate's input
 /// buffers are the physical device's own input streams (if any) followed by one per tap,
 /// in tap-list order: tap i is read from input buffer `base + i`. The device's own input
 /// streams are switched off for the IOProc (IOProcStreamUsage), so its microphone is never opened.

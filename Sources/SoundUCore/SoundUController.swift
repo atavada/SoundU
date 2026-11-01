@@ -345,8 +345,10 @@ public final class SoundUController {
 
     private func rebuildStrips(_ routing: RoutingPlan, activeCallApps: Set<String>) {
         let routed = Set(routing.byDevice.values.joined().map(\.appID))
-        let stalled = engine.stalledDevices
-        let onStalledDevice = Set(routing.byDevice.filter { stalled.contains($0.key) }.values.joined().map(\.appID))
+        let stalled = engine.stalledGraphs
+        let onStalledGraph = Set(routing.byDevice.flatMap { uid, specs in
+            specs.filter { stalled.contains(GraphKey(deviceUID: uid, appID: $0.appID)) }.map(\.appID)
+        })
 
         let strips = grouping.apps.compactMap { app -> AppStrip? in
             let state: StripState
@@ -355,7 +357,7 @@ public final class SoundUController {
                 state = .locked(callApp: app.id)
             } else if let exclusion = routing.excluded[app.id] {
                 state = stripState(app, exclusion, activeCallApps)
-            } else if onStalledDevice.contains(app.id) {
+            } else if onStalledGraph.contains(app.id) {
                 state = .error("The output device stopped responding; retrying shortly")
             } else if routed.contains(app.id) {
                 state = permission == .pending ? .notRouted(.permissionPending)

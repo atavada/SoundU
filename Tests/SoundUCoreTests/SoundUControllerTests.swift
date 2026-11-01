@@ -91,7 +91,7 @@ final class SoundUControllerTests: XCTestCase {
         defer { controller.shutdown() }
         let routed = await waitUntil(1) { self.strip(controller, self.spotifyID)?.state == .routed }
         XCTAssertTrue(routed, "strips: \(controller.apps)")
-        let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
+        let agg = try XCTUnwrap(controller.engine.runningAggregates[GraphKey(deviceUID: "speakers", appID: self.spotifyID)])
 
         controller.setVolume(spotifyID, 0.3)
 
@@ -109,14 +109,14 @@ final class SoundUControllerTests: XCTestCase {
         let (controller, fake, _) = try makeController(settings: settings)
         controller.start()
         defer { controller.shutdown() }
-        let onAirPods = await waitUntil(1) { controller.engine.runningAggregates["airpods"] != nil }
+        let onAirPods = await waitUntil(1) { controller.engine.runningAggregates[GraphKey(deviceUID: "airpods", appID: self.spotifyID)] != nil }
         XCTAssertTrue(onAirPods)
 
         fake.devices = [speakers]
         fake.send(.devices)
 
         let moved = await waitUntil(1) {
-            controller.engine.runningAggregates.keys.sorted() == ["speakers"]
+            controller.engine.runningAggregates.keys.map(\.deviceUID) == ["speakers"]
         }
         XCTAssertTrue(moved, "aggregates: \(controller.engine.runningAggregates)")
         XCTAssertEqual(controller.devices, [speakers])
@@ -153,7 +153,7 @@ final class SoundUControllerTests: XCTestCase {
 
         let lingering = await waitUntil(1) { self.strip(controller, self.spotifyID)?.state == .lingering }
         XCTAssertTrue(lingering, "strips: \(controller.apps)")
-        XCTAssertNotNil(controller.engine.runningAggregates["speakers"], "still tapped while lingering")
+        XCTAssertNotNil(controller.engine.runningAggregates[GraphKey(deviceUID: "speakers", appID: self.spotifyID)], "still tapped while lingering")
     }
 
     func testMeterLevelsPublishedPerApp() async throws {
@@ -162,7 +162,7 @@ final class SoundUControllerTests: XCTestCase {
         defer { controller.shutdown() }
         let routed = await waitUntil(1) { self.strip(controller, self.spotifyID)?.state == .routed }
         XCTAssertTrue(routed)
-        let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
+        let agg = try XCTUnwrap(controller.engine.runningAggregates[GraphKey(deviceUID: "speakers", appID: self.spotifyID)])
 
         // Panel closed: no meter loop.
         _ = render(fake, agg, input: 0.5, cycles: 2)
@@ -222,7 +222,7 @@ final class SoundUControllerTests: XCTestCase {
         defer { controller.shutdown() }
         let routed = await waitUntil(1) { self.strip(controller, self.spotifyID)?.state == .routed }
         XCTAssertTrue(routed)
-        let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
+        let agg = try XCTUnwrap(controller.engine.runningAggregates[GraphKey(deviceUID: "speakers", appID: self.spotifyID)])
 
         try? await Task.sleep(for: .milliseconds(1200)) // a timed re-plan, no IO yet
         XCTAssertEqual(controller.permission, .unknown, "starting a device is not proof of permission")
@@ -238,9 +238,9 @@ final class SoundUControllerTests: XCTestCase {
         let (controller, fake, _) = try makeController(ioTimeout: .milliseconds(50))
         controller.start()
         defer { controller.shutdown() }
-        let started = await waitUntil(1) { controller.engine.runningAggregates["speakers"] != nil }
+        let started = await waitUntil(1) { controller.engine.runningAggregates[GraphKey(deviceUID: "speakers", appID: self.spotifyID)] != nil }
         XCTAssertTrue(started)
-        let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
+        let agg = try XCTUnwrap(controller.engine.runningAggregates[GraphKey(deviceUID: "speakers", appID: self.spotifyID)])
         fake.invokeIO(aggregate: agg)
 
         let stalled = await waitUntil(3.5) {
@@ -262,7 +262,7 @@ final class SoundUControllerTests: XCTestCase {
         defer { controller.shutdown() }
         let routed = await waitUntil(1) { self.strip(controller, self.spotifyID)?.state == .routed }
         XCTAssertTrue(routed, "strips: \(controller.apps)")
-        let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
+        let agg = try XCTUnwrap(controller.engine.runningAggregates[GraphKey(deviceUID: "speakers", appID: self.spotifyID)])
         XCTAssertEqual(render(fake, agg, input: 0.5, cycles: 40), 0.9, accuracy: 0.001)
 
         controller.setBoostCeiling(1.2)
@@ -425,10 +425,10 @@ final class SoundUControllerTests: XCTestCase {
         controller.start()
         defer { controller.shutdown() }
         let on = await waitUntil(1) {
-            controller.callGuard == .on && controller.engine.runningAggregates["speakers"] != nil
+            controller.callGuard == .on && controller.engine.runningAggregates[GraphKey(deviceUID: "speakers", appID: self.spotifyID)] != nil
         }
         XCTAssertTrue(on, "status: \(controller.callGuard)")
-        let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
+        let agg = try XCTUnwrap(controller.engine.runningAggregates[GraphKey(deviceUID: "speakers", appID: self.spotifyID)])
         XCTAssertEqual(noDuckCalls(fake), [.setNoDuck(agg, true)], "exempt whenever SoundU plays")
 
         fake.processList = [process(1, owner: spotify, playing: true), whatsAppProcess(inCall: true)]
@@ -456,9 +456,9 @@ final class SoundUControllerTests: XCTestCase {
         let (controller, fake, _) = try makeController()
         controller.start()
         defer { controller.shutdown() }
-        let started = await waitUntil(1) { controller.engine.runningAggregates["speakers"] != nil }
+        let started = await waitUntil(1) { controller.engine.runningAggregates[GraphKey(deviceUID: "speakers", appID: self.spotifyID)] != nil }
         XCTAssertTrue(started)
-        let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
+        let agg = try XCTUnwrap(controller.engine.runningAggregates[GraphKey(deviceUID: "speakers", appID: self.spotifyID)])
 
         let voiceOver = ProcessSnapshot(objectID: 9, pid: 800, bundleID: "com.apple.VoiceOver",
                                         executablePath: "/System/Library/CoreServices/VoiceOver.app/Contents/MacOS/VoiceOver",

@@ -2,22 +2,39 @@ import CoreAudio
 import Foundation
 import os
 
+/// Identifies one live graph: an app on an output device.
+public struct GraphKey: Hashable, Comparable, Sendable, CustomStringConvertible {
+    public var deviceUID: String
+    public var appID: String
+
+    public init(deviceUID: String, appID: String) {
+        self.deviceUID = deviceUID
+        self.appID = appID
+    }
+
+    public static func < (a: GraphKey, b: GraphKey) -> Bool { (a.deviceUID, a.appID) < (b.deviceUID, b.appID) }
+    public var description: String { "\(appID) on \(deviceUID)" }
+}
+
 public enum EngineEvent: Equatable, Sendable {
     /// The app could not be tapped; it keeps playing directly.
     case tapFailed(appID: String, error: String)
     /// IO got no callbacks after start and none was ever seen this run: Audio Capture permission
     /// is not granted (yet). The graph was torn down, so its apps play directly again.
     case permissionPending
-    case deviceStarted(uid: String, addedLatencyMs: Double)
+    /// A graph for `appID` started on device `uid`.
+    case deviceStarted(uid: String, appID: String, addedLatencyMs: Double)
     /// The first IO callbacks were seen: Audio Capture permission is granted.
     case ioConfirmed(uid: String)
-    /// IO stopped advancing after permission was confirmed; the graph was torn down (its apps
-    /// play directly) and the device is retried after a 5 s back-off.
-    case ioStalled(uid: String)
+    /// IO stopped advancing after permission was confirmed; the graph was torn down (the app
+    /// plays directly) and that app on that device is retried after a 5 s back-off.
+    case ioStalled(uid: String, appID: String)
 }
 
-/// Turns a `RoutingPlan` into live graphs: one `DeviceGraph` (taps + private aggregate +
-/// IOProc) per output device. Volume changes touch only the mixer's atomics.
+/// Turns a `RoutingPlan` into live graphs: one `DeviceGraph` (tap + private aggregate + IOProc)
+/// per (output device, app). Changing an aggregate's tap list restarts IO for every tap on it,
+/// so apps never share one: starting, stopping or re-tapping an app touches only its own
+/// aggregate. Volume changes touch only the mixer's atomics.
 @MainActor
 public final class AudioEngine {
     public var onEvent: (@Sendable (EngineEvent) -> Void)?
@@ -26,8 +43,8 @@ public final class AudioEngine {
     /// While set, `apply` starts no new graphs; the controller clears it to retry on the next `apply`.
     public var permissionPending = false
 
-    /// Device UID → aggregate device of each running graph.
-    public var runningAggregates: [String: AudioObjectID] { graphs.mapValues(\.aggregate) }
+    /// Aggregate device of each running graph.
+    public var runningAggregates: [GraphKey: AudioObjectID] { graphs.mapValues(\.aggregate) }
 
     /// Fallback for the 'nodk' exemption: `AudioDeviceDuck` on the physical device.
     var duckFallback: (AudioObjectID, Bool) -> Void = { device, exempt in
@@ -41,13 +58,16 @@ public final class AudioEngine {
     /// Clock for the IO watchdog; replaceable in tests.
     var now: () -> ContinuousClock.Instant = { .now }
     private static let stallBackoff: Duration = .seconds(5)
-    private var graphs: [String: DeviceGraph] = [:]
+    private var graphs: [GraphKey: DeviceGraph] = [:]
     private var volumes: [String: (volume: Float, muted: Bool)] = [:]
-    /// Device UID → IO progress of its running graph (callback count and when it last changed).
-    private var watches: [String: (count: UInt64, since: ContinuousClock.Instant, bluetooth: Bool)] = [:]
-    /// Device UID → when a stalled device may be started again.
-    private var backoff: [String: ContinuousClock.Instant] = [:]
+    /// IO progress of each running graph (callback count and when it last changed).
+    private var watches: [GraphKey: (count: UInt64, since: ContinuousClock.Instant, bluetooth: Bool)] = [:]
+    /// When a stalled graph may be started again.
+    private var backoff: [GraphKey: ContinuousClock.Instant] = [:]
     private var duckingExempt = false
+    /// Physical device UIDs on which the exemption is currently set. 'nodk' belongs to
+    /// (this process, physical device), so graphs on one device share it.
+    private var noDuckDevices: Set<String> = []
     /// IO callbacks have been seen once this run, so permission is granted.
     private var permissionConfirmed = false
 
@@ -61,42 +81,53 @@ public final class AudioEngine {
     // MARK: - Plan
 
     public func apply(_ plan: RoutingPlan) {
-        for (uid, graph) in graphs where plan.byDevice[uid] == nil { stop(graph) }
-        let stalled = stalledDevices
+        var wanted: [GraphKey: TapSpec] = [:]
+        for (uid, specs) in plan.byDevice {
+            for spec in specs { wanted[GraphKey(deviceUID: uid, appID: spec.appID)] = spec }
+        }
+        for (key, graph) in graphs.sorted(by: { $0.key < $1.key }) where wanted[key] == nil { stop(key, graph) }
+        let stalled = stalledGraphs
 
         let devices = Dictionary(system.outputDevices().map { ($0.uid, $0) }, uniquingKeysWith: { a, _ in a })
-        for (uid, specs) in plan.byDevice.sorted(by: { $0.key < $1.key }) where !specs.isEmpty {
-            if let graph = graphs[uid] {
-                let (failures, stopGraph) = graph.update(specs, gains: gain)
+        for (key, spec) in wanted.sorted(by: { $0.key < $1.key }) {
+            if let graph = graphs[key] {
+                let (failures, stopGraph) = graph.update([spec], gains: gain)
                 report(failures)
-                if stopGraph { stop(graph) }
-            } else if !permissionPending && !stalled.contains(uid) {
-                start(uid, device: devices[uid], specs: specs)
+                if stopGraph { stop(key, graph) }
+            } else if !permissionPending && !stalled.contains(key) {
+                start(key, device: devices[key.deviceUID], spec: spec)
             }
         }
     }
 
-    private func start(_ uid: String, device: OutputDevice?, specs: [TapSpec]) {
-        let (graph, failures) = DeviceGraph.start(system: system, device: device, deviceUID: uid, specs: specs,
-                                                  bufferFrames: bufferFrames, gains: gain)
+    private func start(_ key: GraphKey, device: OutputDevice?, spec: TapSpec) {
+        let (graph, failures) = DeviceGraph.start(system: system, device: device, deviceUID: key.deviceUID,
+                                                  specs: [spec], bufferFrames: bufferFrames, gains: gain)
         report(failures)
         guard let graph else { return }
-        graphs[uid] = graph
-        if duckingExempt { setNoDuck(graph, true) }
+        graphs[key] = graph
+        if duckingExempt && !noDuckDevices.contains(key.deviceUID) {
+            setNoDuck(graph, true)
+            noDuckDevices.insert(key.deviceUID)
+        }
         let latency = system.addedLatencyMs(aggregate: graph.aggregate)
-        Self.log.info("started \(uid, privacy: .public): \(graph.taps.count) taps, added latency \(latency) ms")
-        onEvent?(.deviceStarted(uid: uid, addedLatencyMs: latency))
-        watches[uid] = (0, now(), device.map { Self.bluetoothTransports.contains($0.transport) } ?? false)
+        Self.log.info("started \(key, privacy: .public): added latency \(latency) ms")
+        onEvent?(.deviceStarted(uid: key.deviceUID, appID: key.appID, addedLatencyMs: latency))
+        watches[key] = (0, now(), device.map { Self.bluetoothTransports.contains($0.transport) } ?? false)
     }
 
-    private func stop(_ graph: DeviceGraph) {
-        graphs[graph.deviceUID] = nil
-        watches[graph.deviceUID] = nil
-        graph.teardown { if duckingExempt { setNoDuck(graph, false) } }
+    /// Clears the exemption only when this is the last graph on its physical device.
+    private func stop(_ key: GraphKey, _ graph: DeviceGraph) {
+        graphs[key] = nil
+        watches[key] = nil
+        let last = !graphs.keys.contains { $0.deviceUID == key.deviceUID }
+        graph.teardown {
+            if last && noDuckDevices.remove(key.deviceUID) != nil { setNoDuck(graph, false) }
+        }
     }
 
     public func stopAll() {
-        for graph in graphs.values { stop(graph) }
+        for (key, graph) in graphs.sorted(by: { $0.key < $1.key }) { stop(key, graph) }
     }
 
     private func report(_ failures: [DeviceGraph.Failure]) {
@@ -111,8 +142,8 @@ public final class AudioEngine {
     private static let bluetoothTransports: Set<UInt32> = [kAudioDeviceTransportTypeBluetooth,
                                                            kAudioDeviceTransportTypeBluetoothLE]
 
-    /// Devices whose graph stalled less than 5 s ago; `apply` does not restart them until then.
-    public var stalledDevices: Set<String> {
+    /// Graphs (app on device) that stalled less than 5 s ago; `apply` does not restart them until then.
+    public var stalledGraphs: Set<GraphKey> {
         let now = now()
         return Set(backoff.filter { $0.value > now }.keys)
     }
@@ -121,31 +152,31 @@ public final class AudioEngine {
     /// callbacks seen confirm permission (`.ioConfirmed`). A graph whose callback count has not
     /// advanced for the IO timeout is torn down (its apps play directly): `.permissionPending`
     /// if no IO was ever seen this run (Bluetooth devices get one extra period first, they can
-    /// be slow to start), else `.ioStalled` and the device backs off for 5 s.
+    /// be slow to start), else `.ioStalled` and that graph (app on device) backs off for 5 s.
     public func checkIO() {
         let now = now()
         backoff = backoff.filter { $0.value > now }
-        for (uid, graph) in graphs.sorted(by: { $0.key < $1.key }) {
-            guard var watch = watches[uid] else { continue }
+        for (key, graph) in graphs.sorted(by: { $0.key < $1.key }) {
+            guard var watch = watches[key] else { continue }
             let count = graph.callbackCount
             if count != watch.count {
                 watch.count = count
                 watch.since = now
-                watches[uid] = watch
+                watches[key] = watch
             }
             if count > 0 && !permissionConfirmed {
                 permissionConfirmed = true
-                onEvent?(.ioConfirmed(uid: uid))
+                onEvent?(.ioConfirmed(uid: key.deviceUID))
             }
             let limit = !permissionConfirmed && watch.bluetooth ? ioTimeout * 2 : ioTimeout
             guard now - watch.since >= limit else { continue }
-            stop(graph)
+            stop(key, graph)
             if permissionConfirmed {
-                Self.log.error("IO stalled on \(uid, privacy: .public); retrying in 5 s")
-                backoff[uid] = now + Self.stallBackoff
-                onEvent?(.ioStalled(uid: uid))
+                Self.log.error("IO stalled for \(key, privacy: .public); retrying in 5 s")
+                backoff[key] = now + Self.stallBackoff
+                onEvent?(.ioStalled(uid: key.deviceUID, appID: key.appID))
             } else {
-                Self.log.error("no IO callbacks on \(uid, privacy: .public): Audio Capture permission pending")
+                Self.log.error("no IO callbacks for \(key, privacy: .public): Audio Capture permission pending")
                 permissionPending = true
                 onEvent?(.permissionPending)
             }
@@ -171,11 +202,17 @@ public final class AudioEngine {
 
     // MARK: - Call Guard exemption
 
-    /// Applies the 'nodk' exemption to every running graph's output sub-devices; graphs started
-    /// later get it on start, and each graph clears it when it stops.
+    /// Applies the 'nodk' exemption once per physical device with running graphs; graphs
+    /// started later set it on start if their device lacks it, and the last graph on a device
+    /// clears it when it stops.
     public func setDuckingExempt(_ on: Bool) {
         duckingExempt = on
-        for graph in graphs.values { setNoDuck(graph, on) }
+        var firstGraph: [String: DeviceGraph] = [:]
+        for (key, graph) in graphs.sorted(by: { $0.key > $1.key }) { firstGraph[key.deviceUID] = graph }
+        for (uid, graph) in firstGraph.sorted(by: { $0.key < $1.key }) where noDuckDevices.contains(uid) != on {
+            setNoDuck(graph, on)
+            if on { noDuckDevices.insert(uid) } else { noDuckDevices.remove(uid) }
+        }
     }
 
     private func setNoDuck(_ graph: DeviceGraph, _ on: Bool) {

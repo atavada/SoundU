@@ -81,24 +81,29 @@ final class AudioEngineTests: XCTestCase {
 
     // MARK: - Tests
 
-    func testNewDeviceCreatesTapsAndOneAggregate() throws {
+    func testEachAppGetsItsOwnAggregate() throws {
         let (engine, fake, log) = makeEngine()
         engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2, 3)]]))
 
         let calls = fake.calls
         XCTAssertEqual(createdTaps(calls), [tapName("A"), tapName("B")])
         XCTAssertTrue(calls.contains(.createTap(processObjectIDs: [2, 3], name: tapName("B"))))
-        XCTAssertEqual(aggregates(calls), ["speakers"])
-        XCTAssertEqual(aggregateTapUIDs(calls).first?.count, 2)
-        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
-        XCTAssertTrue(calls.contains(.setBufferFrameSize(agg, 128)))
-        XCTAssertEqual(calls.last, .startIO(aggregate: agg))
-        XCTAssertEqual(fake.activeIOCount, 1)
-        XCTAssertEqual(log.events, [.deviceStarted(uid: "speakers", addedLatencyMs: 10)])
+        XCTAssertEqual(aggregates(calls), ["speakers", "speakers"])
+        XCTAssertEqual(aggregateTapUIDs(calls).map(\.count), [1, 1])
+        let aggA = try XCTUnwrap(engine.runningAggregates[key("speakers", "A")])
+        let aggB = try XCTUnwrap(engine.runningAggregates[key("speakers", "B")])
+        XCTAssertNotEqual(aggA, aggB)
+        XCTAssertTrue(calls.contains(.setBufferFrameSize(aggA, 128)))
+        XCTAssertTrue(calls.contains(.setBufferFrameSize(aggB, 128)))
+        XCTAssertEqual(calls.last, .startIO(aggregate: aggB))
+        XCTAssertEqual(fake.activeIOCount, 2)
+        XCTAssertEqual(log.events, [.deviceStarted(uid: "speakers", appID: "A", addedLatencyMs: 10),
+                                    .deviceStarted(uid: "speakers", appID: "B", addedLatencyMs: 10)])
 
-        // Tap order in the aggregate is the input buffer index: A reads buffer 0, B buffer 1.
-        engine.set(appID: "B", volume: 0, muted: false)
-        XCTAssertEqual(render(fake, agg, inputs: [0.1, 0.3], cycles: 20), 0.1, accuracy: 1e-6)
+        // Each aggregate carries only its app's tap, at input buffer 0.
+        engine.set(appID: "B", volume: 0.5, muted: false)
+        XCTAssertEqual(render(fake, aggA, inputs: [0.1], cycles: 20), 0.1, accuracy: 1e-6)
+        XCTAssertEqual(render(fake, aggB, inputs: [0.3], cycles: 20), 0.15, accuracy: 1e-6)
 
         // Re-applying the same plan changes nothing.
         let before = fake.calls.count
@@ -106,12 +111,14 @@ final class AudioEngineTests: XCTestCase {
         XCTAssertEqual(fake.calls.count, before)
     }
 
-    /// Review Focus 5: Chrome helper processes come and go; only Chrome's tap is replaced, in place.
-    func testTapChangeUpdatesTapListWithoutRecreatingAggregate() throws {
+    /// Review Focus 5: Chrome helper processes come and go; only Chrome's tap is replaced, in
+    /// place on Chrome's own aggregate. Other apps' aggregates get zero HAL calls.
+    func testProcessChurnTouchesOnlyThatAppsAggregate() throws {
         let (engine, fake, _) = makeEngine()
         engine.apply(plan(["speakers": [spec("A", 1), spec("Chrome", 2), spec("C", 3)]]))
-        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
-        let oldUIDs = try XCTUnwrap(aggregateTapUIDs(fake.calls).first)
+        let aggA = try XCTUnwrap(engine.runningAggregates[key("speakers", "A")])
+        let aggChrome = try XCTUnwrap(engine.runningAggregates[key("speakers", "Chrome")])
+        let aggC = try XCTUnwrap(engine.runningAggregates[key("speakers", "C")])
         let mark = fake.calls.count
 
         engine.apply(plan(["speakers": [spec("A", 1), spec("Chrome", 2, 4), spec("C", 3)]]))
@@ -120,62 +127,42 @@ final class AudioEngineTests: XCTestCase {
         XCTAssertEqual(calls.count, 3, "\(calls)")
         XCTAssertEqual(calls[0], .createTap(processObjectIDs: [2, 4], name: tapName("Chrome")))
         guard case .setAggregateTaps(let a, let uids) = calls[1] else { return XCTFail("\(calls)") }
-        XCTAssertEqual(a, agg)
-        XCTAssertEqual(uids.count, 3)
-        XCTAssertEqual(uids[0], oldUIDs[0])
-        XCTAssertNotEqual(uids[1], oldUIDs[1])
-        XCTAssertEqual(uids[2], oldUIDs[2])
+        XCTAssertEqual(a, aggChrome)
+        XCTAssertEqual(uids.count, 1)
         guard case .destroyTap = calls[2] else { return XCTFail("\(calls)") }
-        XCTAssertEqual(engine.runningAggregates["speakers"], agg)
-        XCTAssertEqual(fake.activeIOCount, 1)
+        XCTAssertEqual(engine.runningAggregates[key("speakers", "Chrome")], aggChrome)
+        XCTAssertEqual(fake.activeIOCount, 3)
 
-        // Removing Chrome shifts C from buffer 2 to buffer 1; C must follow its buffer.
+        // Removing Chrome stops only Chrome's graph; A and C keep playing untouched.
         engine.set(appID: "C", volume: 0.5, muted: false)
+        let stop = fake.calls.count
         engine.apply(plan(["speakers": [spec("A", 1), spec("C", 3)]]))
-        XCTAssertEqual(engine.runningAggregates["speakers"], agg)
-        XCTAssertEqual(aggregates(fake.calls).count, 1)
-        XCTAssertEqual(render(fake, agg, inputs: [0.1, 0.3], cycles: 20), 0.25, accuracy: 1e-5)
+        XCTAssertEqual(touching(aggA, fake.calls[stop...]), [])
+        XCTAssertEqual(touching(aggC, fake.calls[stop...]), [])
+        XCTAssertTrue(fake.calls[stop...].contains(.destroyAggregate(aggChrome)))
+        XCTAssertEqual(render(fake, aggC, inputs: [0.3], cycles: 20), 0.15, accuracy: 1e-5)
     }
 
-    /// While the HAL switches to a shifted tap list, no slot may read another app's buffer:
-    /// slots whose buffer index changes are off before the change (a short gap instead).
-    func testShiftedTapListNeverRendersAnotherAppsBuffer() throws {
+    /// A failed tap-list change must not leave the app's old process set tapped (it may now
+    /// include a process shared with a call): that app's graph stops, other apps' stay.
+    func testFailedTapListChangeTearsDownOnlyThatAppsGraph() throws {
         let (engine, fake, _) = makeEngine()
-        engine.set(appID: "A", volume: 0, muted: false)
-        engine.set(appID: "Chrome", volume: 1, muted: false)
-        engine.set(appID: "C", volume: 0.5, muted: false)
-        engine.apply(plan(["speakers": [spec("A", 1), spec("Chrome", 2), spec("C", 3)]]))
-        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
-        XCTAssertEqual(render(fake, agg, inputs: [0, 0.2, 0.3], cycles: 20), 0.35, accuracy: 1e-5)
-
-        // Chrome leaves: the HAL now delivers C's audio in buffer 1, Chrome's old buffer.
-        var during: Float?
-        fake.onSetAggregateTaps = { agg in
-            MainActor.assumeIsolated { during = self.render(fake, agg, inputs: [0, 0.3]) }
-        }
-        engine.apply(plan(["speakers": [spec("A", 1), spec("C", 3)]]))
-
-        XCTAssertEqual(during ?? -1, 0, accuracy: 1e-6, "C's audio must not play at Chrome's gain")
-        XCTAssertEqual(render(fake, agg, inputs: [0, 0.3], cycles: 20), 0.15, accuracy: 1e-5)
-    }
-
-    /// A failed tap-list change must not leave the old list (e.g. a call app) tapped.
-    func testFailedTapListChangeTearsDownGraph() throws {
-        let (engine, fake, _) = makeEngine()
-        engine.apply(plan(["speakers": [spec("A", 1), spec("Call", 2)]]))
-        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
+        engine.apply(plan(["speakers": [spec("A", 1), spec("FaceTime", 2, 5)]]))
+        let aggA = try XCTUnwrap(engine.runningAggregates[key("speakers", "A")])
+        let agg = try XCTUnwrap(engine.runningAggregates[key("speakers", "FaceTime")])
         let mark = fake.calls.count
         fake.failSetAggregateTaps = true
 
-        engine.apply(plan(["speakers": [spec("A", 1)]]))
+        engine.apply(plan(["speakers": [spec("A", 1), spec("FaceTime", 2)]]))
 
         let calls = Array(fake.calls[mark...])
-        XCTAssertNil(engine.runningAggregates["speakers"], "graph stopped: its apps play directly")
+        XCTAssertNil(engine.runningAggregates[key("speakers", "FaceTime")], "graph stopped: the app plays directly")
         XCTAssertTrue(calls.contains(.stopIO(aggregate: agg)))
         XCTAssertTrue(calls.contains(.destroyAggregate(agg)))
         XCTAssertEqual(calls.filter { if case .destroyTap = $0 { true } else { false } }.count, 2,
-                       "both old taps destroyed, the call app's included")
-        XCTAssertEqual(fake.activeIOCount, 0)
+                       "old and new taps destroyed")
+        XCTAssertEqual(touching(aggA, calls), [])
+        XCTAssertEqual(fake.activeIOCount, 1)
     }
 
     /// The physical device's own input streams come first in the aggregate's input buffers.
@@ -184,17 +171,16 @@ final class AudioEngineTests: XCTestCase {
         fake.deviceInputStreams = ["speakers": 1]
         engine.set(appID: "B", volume: 0.5, muted: false)
         engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2)]]))
-        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
-        // Buffer 0 is the microphone and must never be mixed: A = 0.1, B = 0.4 * 0.5.
-        XCTAssertEqual(render(fake, agg, inputs: [0.9, 0.1, 0.4]), 0.3, accuracy: 1e-6)
+        let aggA = try XCTUnwrap(engine.runningAggregates[key("speakers", "A")])
+        let aggB = try XCTUnwrap(engine.runningAggregates[key("speakers", "B")])
+        // Buffer 0 is the microphone and must never be mixed.
+        XCTAssertEqual(render(fake, aggA, inputs: [0.9, 0.1]), 0.1, accuracy: 1e-6)
+        XCTAssertEqual(render(fake, aggB, inputs: [0.9, 0.4]), 0.2, accuracy: 1e-6)
 
-        // After a tap-list change the offset still applies (C appended at buffer 3).
-        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2), spec("C", 3)]]))
-        XCTAssertEqual(render(fake, agg, inputs: [0.9, 0.1, 0.4, 0.05]), 0.35, accuracy: 1e-6)
-
-        // Removing A shifts B and C down; the mic stays out.
-        engine.apply(plan(["speakers": [spec("B", 2), spec("C", 3)]]))
-        XCTAssertEqual(render(fake, agg, inputs: [0.9, 0.4, 0.05]), 0.25, accuracy: 1e-6)
+        // After a tap-list change (B's process set changed) the offset still applies.
+        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2, 3)]]))
+        XCTAssertEqual(engine.runningAggregates[key("speakers", "B")], aggB)
+        XCTAssertEqual(render(fake, aggB, inputs: [0.9, 0.4], cycles: 20), 0.2, accuracy: 1e-6)
     }
 
     /// Finding 7: the device's own input streams (a headset mic) are switched off for our
@@ -202,19 +188,105 @@ final class AudioEngineTests: XCTestCase {
     func testDeviceInputStreamsAreDisabledForTheIOProc() throws {
         let (engine, fake, _) = makeEngine()
         fake.deviceInputStreams = ["speakers": 2]
-        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2)]]))
-        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
+        engine.apply(plan(["speakers": [spec("A", 1)]]))
+        let agg = try XCTUnwrap(engine.runningAggregates[key("speakers", "A")])
         XCTAssertEqual(Array(fake.calls.suffix(2)),
-                       [.setInputStreamUsage(agg, [false, false, true, true]), .startIO(aggregate: agg)])
+                       [.setInputStreamUsage(agg, [false, false, true]), .startIO(aggregate: agg)])
 
-        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2), spec("C", 3)]]))
-        XCTAssertEqual(fake.calls.last { if case .setInputStreamUsage = $0 { true } else { false } },
-                       .setInputStreamUsage(agg, [false, false, true, true, true]))
+        let mark = fake.calls.count
+        engine.apply(plan(["speakers": [spec("A", 1, 3)]]))
+        XCTAssertEqual(fake.calls[mark...].last { if case .setInputStreamUsage = $0 { true } else { false } },
+                       .setInputStreamUsage(agg, [false, false, true]))
 
         // A device with no input streams: nothing to disable, no usage call.
         engine.apply(plan(["airpods": [spec("D", 4)]]))
-        let aggA = try XCTUnwrap(engine.runningAggregates["airpods"])
+        let aggA = try XCTUnwrap(engine.runningAggregates[key("airpods", "D")])
         XCTAssertFalse(fake.calls.contains { if case .setInputStreamUsage(aggA, _) = $0 { true } else { false } })
+    }
+
+    private func key(_ uid: String, _ appID: String) -> GraphKey { GraphKey(deviceUID: uid, appID: appID) }
+
+    /// Calls that touch `agg` (tap-list changes, IO, stream usage, 'nodk', destruction).
+    private func touching(_ agg: AudioObjectID, _ calls: some Sequence<FakeAudioSystem.Call>) -> [FakeAudioSystem.Call] {
+        calls.filter { call in
+            switch call {
+            case .setAggregateTaps(let a, _), .destroyAggregate(let a), .startIO(let a), .stopIO(let a),
+                 .setInputStreamUsage(let a, _), .setNoDuck(let a, _), .setBufferFrameSize(let a, _): a == agg
+            default: false
+            }
+        }
+    }
+
+    /// 2026-11-01: a tap-list change restarts IO for every tap on an aggregate, so a new app
+    /// (a notification sound) on a shared aggregate glitched every other app. Each app now has
+    /// its own aggregate; starting B never touches A's.
+    func testAppStartingNeverTouchesAnotherAppsAggregate() throws {
+        let (engine, fake, _) = makeEngine()
+        engine.apply(plan(["speakers": [spec("A", 1)]]))
+        let aggA = try XCTUnwrap(engine.runningAggregates[key("speakers", "A")])
+        let mark = fake.calls.count
+
+        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2)]]))
+        let aggB = try XCTUnwrap(engine.runningAggregates[key("speakers", "B")])
+        XCTAssertNotEqual(aggA, aggB)
+        XCTAssertEqual(touching(aggA, fake.calls[mark...]), [], "A's aggregate untouched")
+        XCTAssertEqual(aggregateTapUIDs(fake.calls).map(\.count), [1, 1], "one tap per aggregate")
+
+        let stopB = fake.calls.count
+        engine.apply(plan(["speakers": [spec("A", 1)]]))
+        XCTAssertNil(engine.runningAggregates[key("speakers", "B")])
+        XCTAssertEqual(touching(aggA, fake.calls[stopB...]), [], "B stopping leaves A alone")
+        XCTAssertEqual(fake.activeIOCount, 1)
+    }
+
+    /// 'nodk' is per (SoundU process, physical device): set once when the first graph on the
+    /// device starts, cleared only when the last one stops.
+    func testNoDuckIsReferenceCountedPerPhysicalDevice() throws {
+        let (engine, fake, _) = makeEngine()
+        engine.setDuckingExempt(true)
+        func noDucks(from mark: Int) -> [Bool] {
+            fake.calls[mark...].compactMap { if case .setNoDuck(_, let on) = $0 { on } else { nil } }
+        }
+
+        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2)]]))
+        XCTAssertEqual(noDucks(from: 0), [true], "set once for the device")
+
+        var mark = fake.calls.count
+        engine.apply(plan(["speakers": [spec("B", 2)]]))
+        XCTAssertEqual(noDucks(from: mark), [], "B still runs on the device")
+
+        mark = fake.calls.count
+        engine.apply(plan([:]))
+        XCTAssertEqual(noDucks(from: mark), [false], "cleared exactly once with the last graph")
+
+        // Toggling with two graphs running: one call per device each way.
+        engine.setDuckingExempt(false)
+        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2)]]))
+        mark = fake.calls.count
+        engine.setDuckingExempt(true)
+        XCTAssertEqual(noDucks(from: mark), [true])
+        mark = fake.calls.count
+        engine.setDuckingExempt(false)
+        XCTAssertEqual(noDucks(from: mark), [false])
+        mark = fake.calls.count
+        engine.stopAll()
+        XCTAssertEqual(noDucks(from: mark), [], "already cleared")
+    }
+
+    /// The AudioDeviceDuck fallback follows the same per-device rule.
+    func testDuckFallbackIsReferenceCountedPerPhysicalDevice() throws {
+        let (engine, fake, _) = makeEngine()
+        var ducked: [(AudioObjectID, Bool)] = []
+        engine.duckFallback = { ducked.append(($0, $1)) }
+        fake.noDuckSucceeds = false
+        engine.setDuckingExempt(true)
+
+        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2)]]))
+        engine.apply(plan(["speakers": [spec("B", 2)]]))
+        engine.apply(plan([:]))
+
+        XCTAssertEqual(ducked.map(\.0), [10, 10])
+        XCTAssertEqual(ducked.map(\.1), [true, false])
     }
 
     func testTapFailureLeavesAppUntappedAndReports() throws {
@@ -223,15 +295,15 @@ final class AudioEngineTests: XCTestCase {
         engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2)]]))
 
         XCTAssertEqual(aggregateTapUIDs(fake.calls).map(\.count), [1])
-        guard case .tapFailed(let appID, _) = log.events.first else { return XCTFail("\(log.events)") }
-        XCTAssertEqual(appID, "B")
+        let failed = log.events.compactMap { if case .tapFailed(let appID, _) = $0 { appID } else { nil } }
+        XCTAssertEqual(failed, ["B"])
         XCTAssertEqual(engine.takePeaks().keys.sorted(), ["A"])
 
         // Every tap fails: no aggregate at all.
         fake.failingTapNames = [tapName("D")]
         engine.apply(plan(["speakers": [spec("A", 1)], "airpods": [spec("D", 4)]]))
         XCTAssertEqual(aggregates(fake.calls), ["speakers"])
-        XCTAssertNil(engine.runningAggregates["airpods"])
+        XCTAssertNil(engine.runningAggregates[key("airpods", "D")])
     }
 
     func testAggregateFailureDestroysTapsAndReports() {
@@ -249,30 +321,32 @@ final class AudioEngineTests: XCTestCase {
     func testDeviceRemovedTearsDown() throws {
         let (engine, fake, _) = makeEngine()
         engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2)], "airpods": [spec("C", 3)]]))
-        let aggS = try XCTUnwrap(engine.runningAggregates["speakers"])
-        let aggA = try XCTUnwrap(engine.runningAggregates["airpods"])
+        let aggSA = try XCTUnwrap(engine.runningAggregates[key("speakers", "A")])
+        let aggSB = try XCTUnwrap(engine.runningAggregates[key("speakers", "B")])
+        let aggC = try XCTUnwrap(engine.runningAggregates[key("airpods", "C")])
         let mark = fake.calls.count
 
         engine.apply(plan(["airpods": [spec("C", 3)]]))
 
         let calls = Array(fake.calls[mark...])
-        XCTAssertEqual(calls.first, .stopIO(aggregate: aggS))
-        XCTAssertEqual(calls.dropFirst().first, .destroyAggregate(aggS))
-        XCTAssertEqual(calls.dropFirst(2).filter { if case .destroyTap = $0 { true } else { false } }.count, 2)
-        XCTAssertEqual(calls.count, 4)
-        XCTAssertEqual(engine.runningAggregates, ["airpods": aggA])
+        for agg in [aggSA, aggSB] {
+            XCTAssertEqual(touching(agg, calls), [.stopIO(aggregate: agg), .destroyAggregate(agg)])
+        }
+        XCTAssertEqual(calls.filter { if case .destroyTap = $0 { true } else { false } }.count, 2)
+        XCTAssertEqual(calls.count, 6)
+        XCTAssertEqual(engine.runningAggregates, [key("airpods", "C"): aggC])
         XCTAssertEqual(fake.activeIOCount, 1)
 
         engine.stopAll()
         XCTAssertTrue(engine.runningAggregates.isEmpty)
         XCTAssertEqual(fake.activeIOCount, 0)
-        XCTAssertTrue(fake.calls.contains(.destroyAggregate(aggA)))
+        XCTAssertTrue(fake.calls.contains(.destroyAggregate(aggC)))
     }
 
     func testSetVolumeDoesNotTouchHAL() throws {
         let (engine, fake, _) = makeEngine()
         engine.apply(plan(["speakers": [spec("A", 1)]]))
-        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
+        let agg = try XCTUnwrap(engine.runningAggregates[key("speakers", "A")])
         XCTAssertEqual(render(fake, agg, inputs: [0.1]), 0.1, accuracy: 1e-6)
         let calls = fake.calls
 
@@ -289,7 +363,8 @@ final class AudioEngineTests: XCTestCase {
         // A remembered volume applies when the app is (re)tapped.
         engine.set(appID: "B", volume: 0.5, muted: false)
         engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2)]]))
-        XCTAssertEqual(render(fake, agg, inputs: [0, 0.4]), 0.2, accuracy: 1e-6)
+        let aggB = try XCTUnwrap(engine.runningAggregates[key("speakers", "B")])
+        XCTAssertEqual(render(fake, aggB, inputs: [0.4]), 0.2, accuracy: 1e-6)
     }
 
     func testExemptAppliedToEveryGraphAndOnStart() throws {
@@ -298,8 +373,8 @@ final class AudioEngineTests: XCTestCase {
         XCTAssertTrue(fake.calls.isEmpty)
 
         engine.apply(plan(["speakers": [spec("A", 1)], "airpods": [spec("B", 2)]]))
-        let aggS = try XCTUnwrap(engine.runningAggregates["speakers"])
-        let aggA = try XCTUnwrap(engine.runningAggregates["airpods"])
+        let aggS = try XCTUnwrap(engine.runningAggregates[key("speakers", "A")])
+        let aggA = try XCTUnwrap(engine.runningAggregates[key("airpods", "B")])
         XCTAssertTrue(fake.calls.contains(.setNoDuck(aggS, true)))
         XCTAssertTrue(fake.calls.contains(.setNoDuck(aggA, true)))
 
@@ -344,11 +419,11 @@ final class AudioEngineTests: XCTestCase {
         let (engine, fake, log) = makeEngine(ioTimeout: .seconds(2))
         let clock = watched(engine)
         engine.apply(plan(["speakers": [spec("A", 1)]]))
-        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
+        let agg = try XCTUnwrap(engine.runningAggregates[key("speakers", "A")])
 
         clock.advance(.seconds(1.5))
         engine.checkIO()
-        XCTAssertEqual(engine.runningAggregates["speakers"], agg, "not yet 2 s")
+        XCTAssertEqual(engine.runningAggregates[key("speakers", "A")], agg, "not yet 2 s")
 
         clock.advance(.seconds(0.6))
         engine.checkIO()
@@ -379,13 +454,13 @@ final class AudioEngineTests: XCTestCase {
 
         clock.advance(.seconds(3.9))
         engine.checkIO()
-        XCTAssertNotNil(engine.runningAggregates["bt"], "within 2 x 2 s")
+        XCTAssertNotNil(engine.runningAggregates[key("bt", "A")], "within 2 x 2 s")
         XCTAssertFalse(log.events.contains(.permissionPending))
 
         clock.advance(.seconds(0.2))
         engine.checkIO()
         XCTAssertEqual(log.events.last, .permissionPending)
-        XCTAssertNil(engine.runningAggregates["bt"])
+        XCTAssertNil(engine.runningAggregates[key("bt", "A")])
     }
 
     /// `.granted` comes from seeing IO, not from starting a device; confirmed once per run.
@@ -393,7 +468,7 @@ final class AudioEngineTests: XCTestCase {
         let (engine, fake, log) = makeEngine(ioTimeout: .seconds(2))
         let clock = watched(engine)
         engine.apply(plan(["speakers": [spec("A", 1)]]))
-        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
+        let agg = try XCTUnwrap(engine.runningAggregates[key("speakers", "A")])
         engine.checkIO()
         XCTAssertFalse(log.events.contains(.ioConfirmed(uid: "speakers")), "no callbacks yet")
 
@@ -405,42 +480,48 @@ final class AudioEngineTests: XCTestCase {
 
         XCTAssertEqual(log.events.filter { $0 == .ioConfirmed(uid: "speakers") }.count, 1)
         XCTAssertFalse(engine.permissionPending)
-        XCTAssertEqual(engine.runningAggregates["speakers"], agg)
+        XCTAssertEqual(engine.runningAggregates[key("speakers", "A")], agg)
 
         // Once confirmed, a later graph that never runs is a stall, not a permission problem.
         engine.apply(plan(["speakers": [spec("A", 1)], "airpods": [spec("B", 2)]]))
         clock.advance(.seconds(2.1))
         fake.invokeIO(aggregate: agg)
         engine.checkIO()
-        XCTAssertEqual(log.events.last, .ioStalled(uid: "airpods"))
+        XCTAssertEqual(log.events.last, .ioStalled(uid: "airpods", appID: "B"))
         XCTAssertFalse(engine.permissionPending)
         engine.stopAll()
     }
 
     /// IO that stops advancing after it ran: torn down, reported, retried after a 5 s back-off.
-    func testFrozenAfterStartReportsStallAndBacksOff() throws {
+    /// The back-off is per app: another app's graph on the same device keeps running and B
+    /// may still start there.
+    func testFrozenAfterStartReportsStallAndBacksOffThatAppOnly() throws {
         let (engine, fake, log) = makeEngine(ioTimeout: .seconds(2))
         let clock = watched(engine)
-        engine.apply(plan(["speakers": [spec("A", 1)]]))
-        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
+        engine.apply(plan(["speakers": [spec("A", 1), spec("C", 3)]]))
+        let agg = try XCTUnwrap(engine.runningAggregates[key("speakers", "A")])
+        let aggC = try XCTUnwrap(engine.runningAggregates[key("speakers", "C")])
         fake.invokeIO(aggregate: agg)
         engine.checkIO()
 
         clock.advance(.seconds(2.1))
+        fake.invokeIO(aggregate: aggC) // C keeps running
         engine.checkIO()
 
-        XCTAssertEqual(log.events.last, .ioStalled(uid: "speakers"))
+        XCTAssertEqual(log.events.last, .ioStalled(uid: "speakers", appID: "A"))
         XCTAssertFalse(engine.permissionPending)
-        XCTAssertNil(engine.runningAggregates["speakers"], "torn down: the app plays directly")
-        XCTAssertEqual(fake.activeIOCount, 0)
-        XCTAssertEqual(engine.stalledDevices, ["speakers"])
+        XCTAssertNil(engine.runningAggregates[key("speakers", "A")], "torn down: the app plays directly")
+        XCTAssertEqual(engine.runningAggregates[key("speakers", "C")], aggC, "C unaffected")
+        XCTAssertEqual(fake.activeIOCount, 1)
+        XCTAssertEqual(engine.stalledGraphs, [key("speakers", "A")])
 
-        engine.apply(plan(["speakers": [spec("A", 1)]]))
-        XCTAssertNil(engine.runningAggregates["speakers"], "backing off")
+        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2), spec("C", 3)]]))
+        XCTAssertNil(engine.runningAggregates[key("speakers", "A")], "backing off")
+        XCTAssertNotNil(engine.runningAggregates[key("speakers", "B")], "B is not backing off")
         clock.advance(.seconds(5))
-        XCTAssertEqual(engine.stalledDevices, [])
-        engine.apply(plan(["speakers": [spec("A", 1)]]))
-        XCTAssertNotNil(engine.runningAggregates["speakers"], "retried after 5 s")
+        XCTAssertEqual(engine.stalledGraphs, [])
+        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2), spec("C", 3)]]))
+        XCTAssertNotNil(engine.runningAggregates[key("speakers", "A")], "retried after 5 s")
         engine.stopAll()
     }
 }

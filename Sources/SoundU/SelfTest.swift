@@ -56,7 +56,7 @@ enum SelfTest {
         engine.apply(RoutingPlan(byDevice: [uid: [one]], excluded: [:]))
         defer { engine.stopAll() }
 
-        guard let aggregate = engine.runningAggregates[uid] else {
+        guard let aggregate = engine.runningAggregates[GraphKey(deviceUID: uid, appID: one.appID)] else {
             check(false, "start", "no graph started: \(events.all)")
             return 1
         }
@@ -76,25 +76,28 @@ enum SelfTest {
 
         // (b) Added latency.
         let latency = events.all.compactMap { e -> Double? in
-            if case .deviceStarted(uid, let ms) = e { return ms } else { return nil }
+            if case .deviceStarted(uid, _, let ms) = e { return ms } else { return nil }
         }.first ?? .infinity
         let latencyOK = latency <= latencyTargetMs
         check(latencyOK, "added-latency", String(format: "%.2f ms (target <= %.1f, buffer 128, drift on)",
                                                  latency, latencyTargetMs))
 
-        // (c) A second app on the same device updates the tap list in place.
+        // (c) A second app on the same device gets its own aggregate; the first one's is untouched.
         if let second = await startPlayer(wav, system, &players) {
             let two = TapSpec(appID: "selftest.afplay.2", processObjectIDs: [second])
             engine.apply(RoutingPlan(byDevice: [uid: [one, two]], excluded: [:]))
-            let after = engine.runningAggregates[uid]
+            let after = engine.runningAggregates[GraphKey(deviceUID: uid, appID: one.appID)]
+            let secondAggregate = engine.runningAggregates[GraphKey(deviceUID: uid, appID: two.appID)]
             _ = engine.takePeaks()
             try? await Task.sleep(for: .seconds(1))
             let peaks = engine.takePeaks()
             let p1 = peaks[one.appID] ?? 0, p2 = peaks[two.appID] ?? 0
-            check(after == aggregate && peakRange.contains(p1) && peakRange.contains(p2), "tap-list-in-place",
-                  String(format: "aggregate %u -> %u, peak1=%.4f peak2=%.4f", aggregate, after ?? 0, p1, p2))
+            check(after == aggregate && secondAggregate.map { $0 != aggregate } == true
+                  && peakRange.contains(p1) && peakRange.contains(p2), "aggregate-per-app",
+                  String(format: "first %u -> %u, second %u, peak1=%.4f peak2=%.4f",
+                         aggregate, after ?? 0, secondAggregate ?? 0, p1, p2))
         } else {
-            check(false, "tap-list-in-place", "second afplay did not start playing within 3 s")
+            check(false, "aggregate-per-app", "second afplay did not start playing within 3 s")
         }
 
         // (d) 'nodk' on the physical sub-device while running, cleared after stopAll.
@@ -134,7 +137,7 @@ enum SelfTest {
         // Let the HAL drop the destroyed aggregate before the next probe creates one.
         _ = await aggregatesAfterSettling()
         return events.all.compactMap { e -> Double? in
-            if case .deviceStarted(_, let ms) = e { return ms } else { return nil }
+            if case .deviceStarted(_, _, let ms) = e { return ms } else { return nil }
         }.first
     }
 

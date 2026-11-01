@@ -1,0 +1,325 @@
+import AppKit
+import CoreAudio
+import Foundation
+import Observation
+import os
+
+public enum PermissionState: Equatable, Sendable {
+    case unknown, pending, granted
+}
+
+public enum StripState: Equatable, Sendable {
+    case routed
+    /// Routed but silent; released when the 5 s linger expires.
+    case lingering
+    /// Untouched because `callApp` is in a call.
+    case locked(callApp: String)
+    case notRouted(Exclusion)
+    /// Tapping failed; the app plays directly.
+    case error(String)
+}
+
+/// One channel strip as the panel shows it.
+public struct AppStrip: Identifiable, Equatable {
+    public var id: String
+    public var name: String
+    public var icon: NSImage?
+    public var volume: Float
+    public var muted: Bool
+    /// Saved preference (nil = default device), even when that device is absent.
+    public var outputDeviceUID: String?
+    /// Latest meter peak, 0...1.
+    public var level: Float
+    public var state: StripState
+
+    public init(id: String, name: String, icon: NSImage?, volume: Float, muted: Bool,
+                outputDeviceUID: String?, level: Float, state: StripState) {
+        self.id = id
+        self.name = name
+        self.icon = icon
+        self.volume = volume
+        self.muted = muted
+        self.outputDeviceUID = outputDeviceUID
+        self.level = level
+        self.state = state
+    }
+}
+
+/// Glue between the HAL, the planner, the engine and the UI: keeps strips, devices and
+/// permission state current, re-plans on every change, persists settings and drives meters.
+@MainActor
+@Observable
+public final class SoundUController {
+    public private(set) var apps: [AppStrip] = []
+    public private(set) var devices: [OutputDevice] = []
+    public private(set) var defaultDeviceUID: String?
+    public private(set) var permission: PermissionState = .unknown
+
+    @ObservationIgnored let engine: AudioEngine
+    @ObservationIgnored private let system: AudioSystem
+    @ObservationIgnored private let store: SettingsStore
+    @ObservationIgnored private let monitor: ProcessMonitor
+    @ObservationIgnored private let selfBundleID: String
+    @ObservationIgnored private var settings: SettingsSnapshot
+    @ObservationIgnored private var grouping = Grouping()
+    @ObservationIgnored private var lastPlayed: [String: Date] = [:]
+    /// App ID → tap error, kept while the app stays a routing candidate.
+    @ObservationIgnored private var tapErrors: [String: String] = [:]
+    @ObservationIgnored private var icons: [String: NSImage] = [:]
+    @ObservationIgnored private var observation: AnyObject?
+    @ObservationIgnored private var loops: [Task<Void, Never>] = []
+    @ObservationIgnored private var pendingSave: Task<Void, Never>?
+
+    private static let log = Logger(subsystem: "com.example.SoundU", category: "Controller")
+    private static let saveDelay: Duration = .milliseconds(500)
+    private static let replanInterval: Duration = .seconds(1)
+    private static let meterInterval: Duration = .seconds(1.0 / 30)
+
+    public convenience init(system: AudioSystem = CoreAudioSystem(), store: SettingsStore = .standard) {
+        self.init(system: system, store: store, runningApps: ProcessMonitor.workspaceApps,
+                  selfBundleID: Bundle.main.bundleIdentifier ?? "com.example.SoundU",
+                  permissionTimeout: .seconds(2))
+    }
+
+    init(system: AudioSystem, store: SettingsStore, runningApps: @escaping @Sendable () -> [RunningApp],
+         selfBundleID: String, permissionTimeout: Duration) {
+        self.system = system
+        self.store = store
+        self.selfBundleID = selfBundleID
+        settings = store.load()
+        monitor = ProcessMonitor(system: system, runningApps: runningApps)
+        engine = AudioEngine(system: system, permissionTimeout: permissionTimeout)
+    }
+
+    // MARK: - Lifecycle
+
+    /// Starts monitoring and routing. Calling it again is a no-op.
+    public func start() {
+        guard loops.isEmpty else { return }
+        engine.onEvent = { [weak self] event in
+            Task { @MainActor in self?.handle(event) }
+        }
+        for (appID, _) in settings.apps { pushGain(appID) }
+
+        observation = system.observe { [weak self] change in
+            guard change != .processes else { return }
+            Task { @MainActor in self?.refreshDevices() }
+        }
+        monitor.onChange = { [weak self] grouping in
+            Task { @MainActor in self?.update(grouping) }
+        }
+        monitor.start()
+        grouping = monitor.current()
+        devices = system.outputDevices()
+        defaultDeviceUID = system.defaultOutputDeviceUID()
+        replan()
+
+        loops = [
+            repeating(every: Self.replanInterval) { $0.replan() },
+            repeating(every: Self.meterInterval) { $0.updateLevels() },
+        ]
+    }
+
+    /// Stops every graph (apps play directly again) and saves settings now.
+    public func shutdown() {
+        loops.forEach { $0.cancel() }
+        loops = []
+        monitor.onChange = nil
+        observation = nil
+        engine.onEvent = nil
+        engine.stopAll()
+        pendingSave?.cancel()
+        save()
+    }
+
+    /// Clears the engine's permission flag and re-plans, so graphs are tried again.
+    public func retryPermission() {
+        engine.permissionPending = false
+        permission = .unknown
+        replan()
+    }
+
+    // MARK: - Strip actions
+
+    public func setVolume(_ appID: String, _ v: Float) {
+        change(appID) { $0.volume = min(max(v, 0), settings.global.boostCeiling) }
+    }
+
+    public func toggleMute(_ appID: String) {
+        change(appID) { $0.muted.toggle() }
+    }
+
+    /// `deviceUID == nil` follows the default output device.
+    public func setOutput(_ appID: String, deviceUID: String?) {
+        change(appID) { $0.outputDeviceUID = deviceUID }
+        replan()
+    }
+
+    private func change(_ appID: String, _ body: (inout AppSetting) -> Void) {
+        var setting = settings.setting(for: appID)
+        body(&setting)
+        settings.apps[appID] = setting
+        pushGain(appID)
+        if let i = apps.firstIndex(where: { $0.id == appID }) {
+            apps[i].volume = setting.volume
+            apps[i].muted = setting.muted
+            apps[i].outputDeviceUID = setting.outputDeviceUID
+        }
+        scheduleSave()
+    }
+
+    private func pushGain(_ appID: String) {
+        let setting = settings.setting(for: appID)
+        engine.set(appID: appID, volume: setting.volume, muted: setting.muted)
+    }
+
+    // MARK: - Settings persistence
+
+    private func scheduleSave() {
+        pendingSave?.cancel()
+        pendingSave = Task { [weak self] in
+            try? await Task.sleep(for: Self.saveDelay)
+            guard !Task.isCancelled else { return }
+            self?.save()
+        }
+    }
+
+    private func save() {
+        do {
+            try store.save(settings)
+        } catch {
+            Self.log.error("Saving settings failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    // MARK: - Inputs
+
+    private func update(_ grouping: Grouping) {
+        self.grouping = grouping
+        replan()
+    }
+
+    private func refreshDevices() {
+        let devices = system.outputDevices()
+        if devices != self.devices { self.devices = devices }
+        let uid = system.defaultOutputDeviceUID()
+        if uid != defaultDeviceUID { defaultDeviceUID = uid }
+        replan()
+    }
+
+    private func handle(_ event: EngineEvent) {
+        switch event {
+        case .permissionPending:
+            permission = .pending
+            replan()
+        case .deviceStarted:
+            if permission == .unknown { permission = .granted }
+        case .tapFailed(let appID, let error):
+            tapErrors[appID] = error
+            replan()
+        }
+    }
+
+    // MARK: - Planning
+
+    /// Everything the planner needs right now; nil when there is no default output device.
+    private func plannerInput(now: Date) -> PlannerInput? {
+        guard let defaultDeviceUID else { return nil }
+        return PlannerInput(grouping: grouping, settings: settings, devices: devices,
+                            defaultDeviceUID: defaultDeviceUID, activeCallApps: [],
+                            lastPlayed: lastPlayed, now: now, selfBundleID: selfBundleID,
+                            failedApps: Set(tapErrors.keys))
+    }
+
+    private func replan() {
+        let now = Date()
+        for app in grouping.apps where app.isPlaying { lastPlayed[app.id] = now }
+        lastPlayed = lastPlayed.filter { now.timeIntervalSince($0.value) < lingerInterval }
+
+        let input = plannerInput(now: now)
+        let routing = input.map(plan) ?? RoutingPlan(byDevice: [:], excluded: [:])
+        // A failed app is retried once it stops being a candidate (silent past the linger).
+        tapErrors = tapErrors.filter { routing.excluded[$0.key] == .tapFailed }
+        engine.apply(routing)
+        rebuildStrips(routing, activeCallApps: input?.activeCallApps ?? [])
+    }
+
+    private func rebuildStrips(_ routing: RoutingPlan, activeCallApps: Set<String>) {
+        let routed = Set(routing.byDevice.values.joined().map(\.appID))
+        let levels = Dictionary(apps.map { ($0.id, $0.level) }, uniquingKeysWith: { a, _ in a })
+
+        let strips = grouping.apps.compactMap { app -> AppStrip? in
+            let state: StripState
+            if let exclusion = routing.excluded[app.id] {
+                state = stripState(app, exclusion, activeCallApps)
+            } else if routed.contains(app.id) {
+                state = permission == .pending ? .notRouted(.permissionPending)
+                    : app.isPlaying ? .routed : .lingering
+            } else {
+                return nil
+            }
+            let setting = settings.setting(for: app.id)
+            return AppStrip(id: app.id, name: app.name, icon: icon(app), volume: setting.volume,
+                            muted: setting.muted, outputDeviceUID: setting.outputDeviceUID,
+                            level: state == .routed || state == .lingering ? levels[app.id] ?? 0 : 0,
+                            state: state)
+        }
+
+        func rank(_ s: AppStrip) -> Int {
+            switch s.state {
+            case .routed: 0
+            case .lingering: 1
+            default: 2
+            }
+        }
+        let sorted = strips.sorted { (rank($0), $0.name, $0.id) < (rank($1), $1.name, $1.id) }
+        if sorted != apps { apps = sorted }
+    }
+
+    private func stripState(_ app: AudioApp, _ exclusion: Exclusion, _ activeCallApps: Set<String>) -> StripState {
+        switch exclusion {
+        case .callInProgress:
+            return .locked(callApp: app.id)
+        case .sharedWithCall:
+            let callApp = app.processes
+                .compactMap { grouping.sharedOwners[$0.objectID] }
+                .joined()
+                .first { activeCallApps.contains($0) }
+            return .locked(callApp: callApp ?? app.id)
+        case .tapFailed:
+            return .error(tapErrors[app.id] ?? "Could not tap this app")
+        case .soundU, .permissionPending:
+            return .notRouted(exclusion)
+        }
+    }
+
+    /// The owner's icon: the process whose bundle ID is the app's, else the responsible process.
+    private func icon(_ app: AudioApp) -> NSImage? {
+        if let cached = icons[app.id] { return cached }
+        let owner = app.processes.first { $0.bundleID == app.id }?.pid ?? app.processes.first?.responsiblePID
+        guard let owner, let image = NSRunningApplication(processIdentifier: owner)?.icon else { return nil }
+        icons[app.id] = image
+        return image
+    }
+
+    // MARK: - Meters
+
+    private func updateLevels() {
+        let peaks = engine.takePeaks()
+        for i in apps.indices {
+            let level = peaks[apps[i].id] ?? 0
+            if apps[i].level != level { apps[i].level = level }
+        }
+    }
+
+    private func repeating(every interval: Duration,
+                           _ body: @escaping @MainActor (SoundUController) -> Void) -> Task<Void, Never> {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                guard !Task.isCancelled, let self else { return }
+                body(self)
+            }
+        }
+    }
+}

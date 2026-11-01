@@ -33,10 +33,17 @@ swift scripts/render-icon.swift Resources/Icon build/icon
 cp build/icon/AppIcon.icns build/icon/MenuBarTemplate.pdf "$app/Contents/Resources/"
 # Everything else in Resources/ (assets) goes into Contents/Resources.
 for f in Resources/*(N); do
-    [[ "${f:t}" == (Info.plist|Icon) ]] || cp -R "$f" "$app/Contents/Resources/"
+    [[ "${f:t}" == (Info.plist|Icon|SoundU.entitlements) ]] || cp -R "$f" "$app/Contents/Resources/"
 done
 
-codesign --force -s "${SOUNDU_SIGN_IDENTITY:--}" --options runtime "$app"
+codesign --force -s "${SOUNDU_SIGN_IDENTITY:--}" --options runtime \
+    --entitlements Resources/SoundU.entitlements "$app"
+# Under the hardened runtime, macOS refuses process-tap audio unless the app holds the
+# audio-input entitlement (tccd: "kTCCServiceMicrophone requires entitlement").
+if ! codesign -d --entitlements - "$app" 2>/dev/null | grep -q "com.apple.security.device.audio-input"; then
+    echo "error: $app is missing the com.apple.security.device.audio-input entitlement" >&2
+    exit 1
+fi
 echo "built $app ($config)"
 
 if (( install )); then

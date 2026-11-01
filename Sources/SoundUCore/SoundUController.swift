@@ -85,7 +85,10 @@ public final class SoundUController {
     @ObservationIgnored private var exemptionAvailable = false
     /// Last exemption handed to the engine (the engine starts with none).
     @ObservationIgnored private var duckingExempt = false
-    @ObservationIgnored private var voiceOver: (running: Bool, checked: Date)?
+    /// Call apps in a call → when each last ran input (see `updateCalls`).
+    @ObservationIgnored private var calls: [String: Date] = [:]
+    /// Clock for call and linger timing; replaceable in tests.
+    @ObservationIgnored var now: () -> Date = Date.init
 
     private static let log = Logger(subsystem: "com.example.SoundU", category: "Controller")
     private static let saveDelay: Duration = .milliseconds(500)
@@ -294,18 +297,14 @@ public final class SoundUController {
     }
 
     private func callGuardDecision(now: Date) -> CallGuardDecision {
-        evaluateCallGuard(enabled: settings.global.callGuardEnabled,
-                          callApps: Set(settings.global.callApps), grouping: grouping,
-                          voiceOverRunning: isVoiceOverRunning(now: now),
-                          exemptionAvailable: exemptionAvailable)
-    }
-
-    /// Checked at most once per second: it runs on the main actor.
-    private func isVoiceOverRunning(now: Date) -> Bool {
-        if let voiceOver, now.timeIntervalSince(voiceOver.checked) < 1 { return voiceOver.running }
-        let running = system.isProcessRunning(bundleID: "com.apple.VoiceOver")
-        voiceOver = (running, now)
-        return running
+        calls = updateCalls(calls, callApps: Set(settings.global.callApps), grouping: grouping, now: now)
+        let enabled = settings.global.callGuardEnabled
+        // Only matters when the exemption could be set.
+        let voiceOver = enabled && exemptionAvailable && grouping.apps.contains { app in
+            app.processes.contains { $0.bundleID == "com.apple.VoiceOver" }
+        }
+        return evaluateCallGuard(enabled: enabled, activeCallApps: Set(calls.keys), grouping: grouping,
+                                 voiceOverRunning: voiceOver, exemptionAvailable: exemptionAvailable)
     }
 
     /// Everything the planner needs right now; nil when there is no default output device.
@@ -318,7 +317,7 @@ public final class SoundUController {
     }
 
     private func replan() {
-        let now = Date()
+        let now = now()
         for app in grouping.apps where app.isPlaying { lastPlayed[app.id] = now }
         lastPlayed = lastPlayed.filter { now.timeIntervalSince($0.value) < lingerInterval }
 

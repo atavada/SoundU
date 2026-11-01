@@ -20,10 +20,12 @@ final class CallGuardTests: XCTestCase {
     }
 
     private func evaluate(_ procs: [ProcessSnapshot], running: [RunningApp], enabled: Bool = true,
-                          voiceOver: Bool = false, available: Bool = true) -> CallGuardDecision {
-        evaluateCallGuard(enabled: enabled, callApps: callApps,
-                          grouping: groupProcesses(procs, runningApps: running),
-                          voiceOverRunning: voiceOver, exemptionAvailable: available)
+                          voiceOver: Bool = false, available: Bool = true,
+                          callApps: Set<String>? = nil) -> CallGuardDecision {
+        let grouping = groupProcesses(procs, runningApps: running)
+        let calls = updateCalls([:], callApps: callApps ?? self.callApps, grouping: grouping, now: Date())
+        return evaluateCallGuard(enabled: enabled, activeCallApps: Set(calls.keys), grouping: grouping,
+                                 voiceOverRunning: voiceOver, exemptionAvailable: available)
     }
 
     /// WhatsApp in a call (one process running input and output) while Spotify plays.
@@ -65,6 +67,35 @@ final class CallGuardTests: XCTestCase {
         XCTAssertEqual(decision.status, .protecting(appName: "FaceTime"))
         XCTAssertEqual(decision.activeCallApps, [faceTimeID])
         XCTAssertTrue(decision.exemptOutput)
+    }
+
+    /// A call-capable app sharing avconferenced (Phone) in the list detects the FaceTime-owned call.
+    func testSharedOwnerInListDetectsCall() {
+        let phone = RunningApp(pid: 410, bundleID: "com.apple.mobilephone", name: "Phone")
+        let avconferenced = ProcessSnapshot(objectID: 7, pid: 900, bundleID: "com.apple.avconferenced",
+                                            executablePath: "/usr/libexec/avconferenced", parentPID: 1,
+                                            responsiblePID: 900, isRunningOutput: true, isRunningInput: true)
+        let decision = evaluate([avconferenced], running: [faceTime, phone], callApps: ["com.apple.mobilephone"])
+
+        XCTAssertEqual(decision.activeCallApps, [faceTimeID])
+    }
+
+    func testCallHysteresis() {
+        let t0 = Date()
+        func grouping(output: Bool, input: Bool) -> Grouping {
+            groupProcesses([proc(1, whatsApp, output: output, input: input)], runningApps: [whatsApp])
+        }
+        var calls = updateCalls([:], callApps: callApps, grouping: grouping(output: true, input: false), now: t0)
+        XCTAssertEqual(calls, [:], "output alone never starts a call")
+        calls = updateCalls(calls, callApps: callApps, grouping: grouping(output: true, input: true), now: t0)
+        XCTAssertEqual(calls, [whatsAppID: t0])
+        calls = updateCalls(calls, callApps: callApps, grouping: grouping(output: true, input: false),
+                            now: t0 + 4.9)
+        XCTAssertEqual(calls, [whatsAppID: t0], "input gap under 5 s")
+        XCTAssertEqual(updateCalls(calls, callApps: callApps, grouping: grouping(output: true, input: false),
+                                   now: t0 + 5.1), [:], "input gone over 5 s")
+        XCTAssertEqual(updateCalls(calls, callApps: callApps, grouping: grouping(output: false, input: true),
+                                   now: t0 + 1), [:], "output stopped: call over")
     }
 
     func testVoiceOverDisablesExemptionButKeepsLock() {

@@ -1,4 +1,3 @@
-import AppKit
 import CoreAudio
 import Foundation
 import os
@@ -220,11 +219,6 @@ public final class CoreAudioSystem: AudioSystem {
         let latency = HAL.uint32(aggregate, kAudioDevicePropertyLatency, input) ?? 0
         let safety = HAL.uint32(aggregate, kAudioDevicePropertySafetyOffset, input) ?? 0
         return Double(2 * buffer + latency + safety) / rate * 1000
-    }
-
-    public func isProcessRunning(bundleID: String) -> Bool {
-        !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty
-            || processes().contains { $0.bundleID == bundleID }
     }
 
     // MARK: - Errors

@@ -94,5 +94,4 @@ public protocol AudioSystem: AnyObject, Sendable {
     func setNoDuck(subDevicesOf agg: AudioObjectID, _ on: Bool) -> Bool
     func setBufferFrameSize(_ dev: AudioObjectID, _ frames: UInt32) throws
     func addedLatencyMs(aggregate: AudioObjectID) -> Double
-    func isProcessRunning(bundleID: String) -> Bool
 }

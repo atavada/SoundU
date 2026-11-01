@@ -281,9 +281,102 @@ final class SoundUControllerTests: XCTestCase {
 
     /// A WhatsApp process (not a running app here, so it groups under its own bundle ID).
     private func whatsAppProcess(inCall: Bool) -> ProcessSnapshot {
+        whatsAppProcess(output: inCall, input: inCall)
+    }
+
+    private func whatsAppProcess(output: Bool, input: Bool) -> ProcessSnapshot {
         ProcessSnapshot(objectID: 2, pid: 300, bundleID: whatsAppID,
                         executablePath: "/Applications/WhatsApp.app/Contents/MacOS/WhatsApp",
-                        parentPID: 1, responsiblePID: 300, isRunningOutput: inCall, isRunningInput: inCall)
+                        parentPID: 1, responsiblePID: 300, isRunningOutput: output, isRunningInput: input)
+    }
+
+    private func tapped(_ fake: FakeAudioSystem, _ appID: String) -> Bool {
+        fake.calls.contains { call in
+            if case .createTap(_, let name) = call { name.hasSuffix("-\(appID)") } else { false }
+        }
+    }
+
+    /// Controller clock the test moves by hand; re-plans still run every real second.
+    private final class Clock {
+        var now = Date()
+    }
+
+    private func clocked(_ controller: SoundUController) -> Clock {
+        let clock = Clock()
+        controller.now = { clock.now }
+        return clock
+    }
+
+    /// Finding 1: a short input gap (mic mute, route change) must not end the call; the call
+    /// ends once input has been gone for more than 5 s, even with output still running.
+    func testCallSurvivesShortInputGapAndEndsAfterFiveSeconds() async throws {
+        let (controller, fake, _) = try makeController()
+        let clock = clocked(controller)
+        controller.start()
+        defer { controller.shutdown() }
+        fake.processList = [process(1, owner: spotify, playing: true), whatsAppProcess(inCall: true)]
+        fake.send(.processes)
+        let locked = await waitUntil(1) { self.strip(controller, self.whatsAppID)?.state == .locked(callApp: self.whatsAppID) }
+        XCTAssertTrue(locked, "strips: \(controller.apps)")
+
+        // Mic muted: output continues, input stops.
+        fake.processList = [process(1, owner: spotify, playing: true), whatsAppProcess(output: true, input: false)]
+        fake.send(.processes)
+        try? await Task.sleep(for: .milliseconds(300))
+        clock.now += 2
+        try? await Task.sleep(for: .milliseconds(1100)) // a timed re-plan at +2 s
+        XCTAssertEqual(strip(controller, whatsAppID)?.state, .locked(callApp: whatsAppID), "2 s gap: still in call")
+        XCTAssertEqual(controller.callGuard, .protecting(appName: "WhatsApp"))
+        XCTAssertFalse(tapped(fake, whatsAppID), "the call app is never tapped")
+
+        clock.now += 3.5 // input gone 5.5 s
+        let ended = await waitUntil(1.5) { controller.callGuard == .on }
+        XCTAssertTrue(ended, "status: \(controller.callGuard)")
+        XCTAssertNotEqual(strip(controller, whatsAppID)?.state, .locked(callApp: whatsAppID))
+    }
+
+    /// Finding 1: `com.apple.avconferenced` alone in the list detects a FaceTime call, although
+    /// avconferenced is grouped under the FaceTime owner.
+    func testAvconferencedEntryDetectsFaceTimeCall() async throws {
+        let (controller, fake, _) = try makeController()
+        controller.setCallApps(["com.apple.avconferenced"])
+        controller.start()
+        defer { controller.shutdown() }
+        let avconferenced = ProcessSnapshot(objectID: 7, pid: 900, bundleID: "com.apple.avconferenced",
+                                            executablePath: "/usr/libexec/avconferenced", parentPID: 1,
+                                            responsiblePID: 900, isRunningOutput: true, isRunningInput: true)
+        fake.processList = [process(1, owner: spotify, playing: true), avconferenced]
+        fake.send(.processes)
+
+        let protecting = await waitUntil(1) { controller.callGuard == .protecting(appName: "FaceTime") }
+        XCTAssertTrue(protecting, "status: \(controller.callGuard)")
+        XCTAssertEqual(strip(controller, "com.apple.FaceTime")?.state, .locked(callApp: "com.apple.FaceTime"))
+        XCTAssertFalse(tapped(fake, "com.apple.FaceTime"))
+    }
+
+    /// Call Guard off or unavailable only affects the exemption: a call is still never tapped.
+    func testDisabledOrUnavailableCallGuardStillLocksCall() async throws {
+        for unavailable in [false, true] {
+            let (controller, fake, _) = try makeController()
+            if unavailable {
+                fake.noDuckSupported = false
+                controller.duckFallbackAvailable = { false }
+            } else {
+                controller.setCallGuardEnabled(false)
+            }
+            controller.start()
+            fake.processList = [process(1, owner: spotify, playing: true), whatsAppProcess(inCall: true)]
+            fake.send(.processes)
+
+            let locked = await waitUntil(1) {
+                self.strip(controller, self.whatsAppID)?.state == .locked(callApp: self.whatsAppID)
+            }
+            XCTAssertTrue(locked, "unavailable=\(unavailable) strips: \(controller.apps)")
+            XCTAssertEqual(controller.callGuard, unavailable ? .unavailable : .off)
+            try? await Task.sleep(for: .milliseconds(1100))
+            XCTAssertFalse(tapped(fake, whatsAppID), "unavailable=\(unavailable)")
+            controller.shutdown()
+        }
     }
 
     private func noDuckCalls(_ fake: FakeAudioSystem) -> [FakeAudioSystem.Call] {
@@ -330,13 +423,18 @@ final class SoundUControllerTests: XCTestCase {
         XCTAssertTrue(started)
         let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
 
-        fake.runningBundleIDs = ["com.apple.VoiceOver"]
-        let dropped = await waitUntil(2.5) { self.noDuckCalls(fake).last == .setNoDuck(agg, false) }
+        let voiceOver = ProcessSnapshot(objectID: 9, pid: 800, bundleID: "com.apple.VoiceOver",
+                                        executablePath: "/System/Library/CoreServices/VoiceOver.app/Contents/MacOS/VoiceOver",
+                                        parentPID: 1, responsiblePID: 800, isRunningOutput: false, isRunningInput: false)
+        fake.processList = [process(1, owner: spotify, playing: true), voiceOver]
+        fake.send(.processes)
+        let dropped = await waitUntil(1) { self.noDuckCalls(fake).last == .setNoDuck(agg, false) }
         XCTAssertTrue(dropped, "calls: \(noDuckCalls(fake))")
         XCTAssertEqual(controller.callGuard, .on, "VoiceOver keeps Call Guard on; only the exemption is skipped")
 
-        fake.runningBundleIDs = []
-        let restored = await waitUntil(2.5) { self.noDuckCalls(fake).last == .setNoDuck(agg, true) }
+        fake.processList = [process(1, owner: spotify, playing: true)]
+        fake.send(.processes)
+        let restored = await waitUntil(1) { self.noDuckCalls(fake).last == .setNoDuck(agg, true) }
         XCTAssertTrue(restored, "calls: \(noDuckCalls(fake))")
 
         controller.setCallGuardEnabled(false)

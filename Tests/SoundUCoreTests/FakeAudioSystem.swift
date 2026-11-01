@@ -30,7 +30,6 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
     private var _onSetAggregateTaps: ((AudioObjectID) -> Void)?
     private var _deviceInputStreams: [String: Int] = [:]
     private var aggregateLayout: [AudioObjectID: (deviceUID: String, taps: Int)] = [:]
-    private var _runningBundleIDs: Set<String> = []
     private var _noDuckSupported = true
     private var _noDuckSucceeds = true
     private var _latencyMs: Double = 10
@@ -78,10 +77,6 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
     var deviceInputStreams: [String: Int] {
         get { locked { _deviceInputStreams } }
         set { locked { _deviceInputStreams = newValue } }
-    }
-    var runningBundleIDs: Set<String> {
-        get { locked { _runningBundleIDs } }
-        set { locked { _runningBundleIDs = newValue } }
     }
     var noDuckSupported: Bool {
         get { locked { _noDuckSupported } }
@@ -216,10 +211,6 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
     }
 
     func addedLatencyMs(aggregate: AudioObjectID) -> Double { latencyMs }
-
-    func isProcessRunning(bundleID: String) -> Bool {
-        locked { _runningBundleIDs.contains(bundleID) || _processes.contains { $0.bundleID == bundleID } }
-    }
 
     // MARK: - Helpers
 

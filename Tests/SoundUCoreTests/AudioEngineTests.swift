@@ -19,12 +19,12 @@ final class AudioEngineTests: XCTestCase {
         func append(_ e: EngineEvent) { lock.lock(); _events.append(e); lock.unlock() }
     }
 
-    private func makeEngine(permissionTimeout: Duration = .seconds(60))
+    private func makeEngine(ioTimeout: Duration = .seconds(60))
         -> (AudioEngine, FakeAudioSystem, EventLog) {
         let fake = FakeAudioSystem()
         fake.devices = [speakers, airPods]
         fake.defaultUID = "speakers"
-        let engine = AudioEngine(system: fake, permissionTimeout: permissionTimeout)
+        let engine = AudioEngine(system: fake, ioTimeout: ioTimeout)
         let log = EventLog()
         engine.onEvent = { log.append($0) }
         return (engine, fake, log)
@@ -324,13 +324,34 @@ final class AudioEngineTests: XCTestCase {
         XCTAssertEqual(ducked.map(\.1), [false, true])
     }
 
+    /// Manual clock for the IO watchdog.
+    private final class Clock {
+        var now = ContinuousClock.now
+        func advance(_ d: Duration) { now += d }
+    }
+
+    private func watched(_ engine: AudioEngine) -> Clock {
+        let clock = Clock()
+        engine.now = { clock.now }
+        return clock
+    }
+
+    private let bluetooth = OutputDevice(id: 30, uid: "bt", name: "Headset", sampleRate: 48_000,
+                                         outputChannels: 2, transport: kAudioDeviceTransportTypeBluetooth)
+
     /// Review Focus 1: no IO callbacks (permission not granted) → report, untap, keep apps playing.
-    func testNoCallbacksReportsPermissionPendingAndUntaps() async throws {
-        let (engine, fake, log) = makeEngine(permissionTimeout: .milliseconds(50))
+    func testFrozenFromStartReportsPermissionPendingAndUntaps() throws {
+        let (engine, fake, log) = makeEngine(ioTimeout: .seconds(2))
+        let clock = watched(engine)
         engine.apply(plan(["speakers": [spec("A", 1)]]))
         let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
 
-        try await Task.sleep(for: .milliseconds(300))
+        clock.advance(.seconds(1.5))
+        engine.checkIO()
+        XCTAssertEqual(engine.runningAggregates["speakers"], agg, "not yet 2 s")
+
+        clock.advance(.seconds(0.6))
+        engine.checkIO()
 
         XCTAssertEqual(log.events.last, .permissionPending)
         XCTAssertTrue(engine.permissionPending)
@@ -349,22 +370,77 @@ final class AudioEngineTests: XCTestCase {
         engine.stopAll()
     }
 
-    func testCallbacksWithinTimeoutConfirmPermission() async throws {
-        let (engine, fake, log) = makeEngine(permissionTimeout: .milliseconds(50))
+    /// Bluetooth devices can take longer to start: one extra period before `.permissionPending`.
+    func testBluetoothGetsOneExtraPeriodBeforePermissionPending() throws {
+        let (engine, fake, log) = makeEngine(ioTimeout: .seconds(2))
+        fake.devices = [speakers, bluetooth]
+        let clock = watched(engine)
+        engine.apply(plan(["bt": [spec("A", 1)]]))
+
+        clock.advance(.seconds(3.9))
+        engine.checkIO()
+        XCTAssertNotNil(engine.runningAggregates["bt"], "within 2 x 2 s")
+        XCTAssertFalse(log.events.contains(.permissionPending))
+
+        clock.advance(.seconds(0.2))
+        engine.checkIO()
+        XCTAssertEqual(log.events.last, .permissionPending)
+        XCTAssertNil(engine.runningAggregates["bt"])
+    }
+
+    /// `.granted` comes from seeing IO, not from starting a device; confirmed once per run.
+    func testCallbacksConfirmIOOnce() throws {
+        let (engine, fake, log) = makeEngine(ioTimeout: .seconds(2))
+        let clock = watched(engine)
         engine.apply(plan(["speakers": [spec("A", 1)]]))
         let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
-        fake.invokeIO(aggregate: agg)
+        engine.checkIO()
+        XCTAssertFalse(log.events.contains(.ioConfirmed(uid: "speakers")), "no callbacks yet")
 
-        try await Task.sleep(for: .milliseconds(300))
+        for _ in 0..<5 { // IO keeps running: never stalled
+            fake.invokeIO(aggregate: agg)
+            clock.advance(.seconds(1))
+            engine.checkIO()
+        }
 
-        XCTAssertFalse(log.events.contains(.permissionPending))
+        XCTAssertEqual(log.events.filter { $0 == .ioConfirmed(uid: "speakers") }.count, 1)
         XCTAssertFalse(engine.permissionPending)
         XCTAssertEqual(engine.runningAggregates["speakers"], agg)
 
-        // Once confirmed, later graphs are not checked again.
+        // Once confirmed, a later graph that never runs is a stall, not a permission problem.
         engine.apply(plan(["speakers": [spec("A", 1)], "airpods": [spec("B", 2)]]))
-        try await Task.sleep(for: .milliseconds(300))
-        XCTAssertNotNil(engine.runningAggregates["airpods"])
+        clock.advance(.seconds(2.1))
+        fake.invokeIO(aggregate: agg)
+        engine.checkIO()
+        XCTAssertEqual(log.events.last, .ioStalled(uid: "airpods"))
+        XCTAssertFalse(engine.permissionPending)
+        engine.stopAll()
+    }
+
+    /// IO that stops advancing after it ran: torn down, reported, retried after a 5 s back-off.
+    func testFrozenAfterStartReportsStallAndBacksOff() throws {
+        let (engine, fake, log) = makeEngine(ioTimeout: .seconds(2))
+        let clock = watched(engine)
+        engine.apply(plan(["speakers": [spec("A", 1)]]))
+        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
+        fake.invokeIO(aggregate: agg)
+        engine.checkIO()
+
+        clock.advance(.seconds(2.1))
+        engine.checkIO()
+
+        XCTAssertEqual(log.events.last, .ioStalled(uid: "speakers"))
+        XCTAssertFalse(engine.permissionPending)
+        XCTAssertNil(engine.runningAggregates["speakers"], "torn down: the app plays directly")
+        XCTAssertEqual(fake.activeIOCount, 0)
+        XCTAssertEqual(engine.stalledDevices, ["speakers"])
+
+        engine.apply(plan(["speakers": [spec("A", 1)]]))
+        XCTAssertNil(engine.runningAggregates["speakers"], "backing off")
+        clock.advance(.seconds(5))
+        XCTAssertEqual(engine.stalledDevices, [])
+        engine.apply(plan(["speakers": [spec("A", 1)]]))
+        XCTAssertNotNil(engine.runningAggregates["speakers"], "retried after 5 s")
         engine.stopAll()
     }
 }

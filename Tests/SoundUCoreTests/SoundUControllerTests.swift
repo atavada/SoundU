@@ -32,7 +32,7 @@ final class SoundUControllerTests: XCTestCase {
     }
 
     private func makeController(settings: SettingsSnapshot = SettingsSnapshot(), playing: Bool = true,
-                                permissionTimeout: Duration = .seconds(60))
+                                ioTimeout: Duration = .seconds(60))
         throws -> (SoundUController, FakeAudioSystem, SettingsStore) {
         let fake = FakeAudioSystem()
         fake.devices = [speakers, airPods]
@@ -42,7 +42,7 @@ final class SoundUControllerTests: XCTestCase {
         try store.save(settings)
         let apps = [spotify]
         let controller = SoundUController(system: fake, store: store, runningApps: { apps },
-                                          selfBundleID: "com.example.SoundU", permissionTimeout: permissionTimeout)
+                                          selfBundleID: "com.example.SoundU", ioTimeout: ioTimeout)
         return (controller, fake, store)
     }
 
@@ -174,16 +174,54 @@ final class SoundUControllerTests: XCTestCase {
 
     /// Review Focus 1 at the controller: no IO callbacks → `.pending`, nothing left tapped.
     func testPermissionPendingWhenEngineReportsIt() async throws {
-        let (controller, fake, _) = try makeController(permissionTimeout: .milliseconds(50))
+        let (controller, fake, _) = try makeController(ioTimeout: .milliseconds(50))
         controller.start()
         defer { controller.shutdown() }
 
-        let pending = await waitUntil(1) { controller.permission == .pending }
+        // The watchdog runs on the 1 s re-plan.
+        let pending = await waitUntil(2) { controller.permission == .pending }
 
         XCTAssertTrue(pending, "permission: \(controller.permission)")
         XCTAssertTrue(controller.engine.runningAggregates.isEmpty, "no apps routed")
         XCTAssertEqual(fake.activeIOCount, 0)
         XCTAssertEqual(strip(controller, spotifyID)?.state, .notRouted(.permissionPending))
+    }
+
+    func testGrantedOnlyOnceIOIsConfirmed() async throws {
+        let (controller, fake, _) = try makeController()
+        controller.start()
+        defer { controller.shutdown() }
+        let routed = await waitUntil(1) { self.strip(controller, self.spotifyID)?.state == .routed }
+        XCTAssertTrue(routed)
+        let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
+
+        try? await Task.sleep(for: .milliseconds(1200)) // a timed re-plan, no IO yet
+        XCTAssertEqual(controller.permission, .unknown, "starting a device is not proof of permission")
+
+        fake.invokeIO(aggregate: agg)
+        let granted = await waitUntil(2) { controller.permission == .granted }
+        XCTAssertTrue(granted, "permission: \(controller.permission)")
+    }
+
+    /// IO that stops after it ran: the graph is torn down (the app plays directly) and the strip
+    /// shows an error until the 5 s back-off retry.
+    func testStalledIOShowsStripErrorAndUntaps() async throws {
+        let (controller, fake, _) = try makeController(ioTimeout: .milliseconds(50))
+        controller.start()
+        defer { controller.shutdown() }
+        let started = await waitUntil(1) { controller.engine.runningAggregates["speakers"] != nil }
+        XCTAssertTrue(started)
+        let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
+        fake.invokeIO(aggregate: agg)
+
+        let stalled = await waitUntil(3.5) {
+            if case .error = self.strip(controller, self.spotifyID)?.state { true } else { false }
+        }
+
+        XCTAssertTrue(stalled, "strips: \(controller.apps)")
+        XCTAssertEqual(controller.permission, .granted)
+        XCTAssertTrue(controller.engine.runningAggregates.isEmpty)
+        XCTAssertEqual(fake.activeIOCount, 0)
     }
 
     func testCeilingChangeClampsExistingVolumes() async throws {

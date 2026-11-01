@@ -95,18 +95,18 @@ public final class SoundUController {
     public convenience init(system: AudioSystem = CoreAudioSystem(), store: SettingsStore = .standard) {
         self.init(system: system, store: store, runningApps: ProcessMonitor.workspaceApps,
                   selfBundleID: Bundle.main.bundleIdentifier ?? "com.example.SoundU",
-                  permissionTimeout: .seconds(2))
+                  ioTimeout: .seconds(2))
     }
 
     init(system: AudioSystem, store: SettingsStore, runningApps: @escaping @Sendable () -> [RunningApp],
-         selfBundleID: String, permissionTimeout: Duration) {
+         selfBundleID: String, ioTimeout: Duration) {
         self.system = system
         self.store = store
         self.selfBundleID = selfBundleID
         settings = store.load()
         global = settings.global
         monitor = ProcessMonitor(system: system, runningApps: runningApps)
-        engine = AudioEngine(system: system, permissionTimeout: permissionTimeout)
+        engine = AudioEngine(system: system, ioTimeout: ioTimeout)
     }
 
     // MARK: - Lifecycle
@@ -275,7 +275,11 @@ public final class SoundUController {
             permission = .pending
             replan()
         case .deviceStarted:
-            if permission == .unknown { permission = .granted }
+            break
+        case .ioConfirmed:
+            if permission != .granted { permission = .granted }
+        case .ioStalled:
+            replan()
         case .tapFailed(let appID, let error):
             tapErrors[appID] = error
             replan()
@@ -330,12 +334,15 @@ public final class SoundUController {
         let routing = input.map(plan) ?? RoutingPlan(byDevice: [:], excluded: [:])
         // A failed app is retried once it stops being a candidate (silent past the linger).
         tapErrors = tapErrors.filter { routing.excluded[$0.key] == .tapFailed }
+        engine.checkIO()
         engine.apply(routing)
         rebuildStrips(routing, activeCallApps: decision.activeCallApps)
     }
 
     private func rebuildStrips(_ routing: RoutingPlan, activeCallApps: Set<String>) {
         let routed = Set(routing.byDevice.values.joined().map(\.appID))
+        let stalled = engine.stalledDevices
+        let onStalledDevice = Set(routing.byDevice.filter { stalled.contains($0.key) }.values.joined().map(\.appID))
 
         let strips = grouping.apps.compactMap { app -> AppStrip? in
             let state: StripState
@@ -344,6 +351,8 @@ public final class SoundUController {
                 state = .locked(callApp: app.id)
             } else if let exclusion = routing.excluded[app.id] {
                 state = stripState(app, exclusion, activeCallApps)
+            } else if onStalledDevice.contains(app.id) {
+                state = .error("The output device stopped responding; retrying shortly")
             } else if routed.contains(app.id) {
                 state = permission == .pending ? .notRouted(.permissionPending)
                     : app.isPlaying ? .routed : .lingering

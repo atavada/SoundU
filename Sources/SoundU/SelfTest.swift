@@ -66,6 +66,7 @@ enum SelfTest {
         let peak = engine.takePeaks()[one.appID] ?? 0
         if peak == 0 {
             try? await Task.sleep(for: .seconds(1.5))
+            engine.checkIO() // the app's controller runs this watchdog on every re-plan
             if events.all.contains(.permissionPending) {
                 check(false, "permission", "no IO callbacks within 2 s (Audio Capture permission pending or denied)")
                 return 1

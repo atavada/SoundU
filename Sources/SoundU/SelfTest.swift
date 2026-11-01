@@ -1,3 +1,4 @@
+#if DEBUG
 import CoreAudio
 import Foundation
 import SoundUCore
@@ -216,3 +217,4 @@ enum SelfTest {
         }
     }
 }
+#endif

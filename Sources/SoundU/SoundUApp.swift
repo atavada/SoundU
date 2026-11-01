@@ -1,5 +1,6 @@
-// SoundU entry point. `SoundU --selftest` runs the engine hardware self-test and
-// `SoundU --headless` the controller debug command; anything else starts the menu-bar app.
+// SoundU entry point. In debug builds `SoundU --selftest` runs the engine hardware self-test and
+// `SoundU --headless` the controller debug command; release builds ignore both flags.
+// Anything else starts the menu-bar app.
 import AppKit
 import SoundUCore
 import SwiftUI
@@ -7,12 +8,14 @@ import SwiftUI
 @main
 enum Entry {
     static func main() async {
+        #if DEBUG
         if CommandLine.arguments.contains("--selftest") {
             exit(await SelfTest.run())
         }
         if CommandLine.arguments.contains("--headless") {
             exit(await Headless.run(arguments: CommandLine.arguments))
         }
+        #endif
         await MainActor.run { SoundUApp.main() }
     }
 }

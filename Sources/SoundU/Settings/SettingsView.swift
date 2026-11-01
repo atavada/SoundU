@@ -22,13 +22,27 @@ struct SettingsView: View {
 
 private struct GeneralTab: View {
     let controller: SoundUController
+    @State private var needsApproval = false
 
     var body: some View {
         Form {
             Toggle("Launch at login", isOn: Binding(
                 get: { controller.global.launchAtLogin },
-                set: { controller.setLaunchAtLogin(LaunchAtLogin.set($0)) }
+                set: {
+                    controller.setLaunchAtLogin(LaunchAtLogin.set($0))
+                    needsApproval = LaunchAtLogin.needsApproval
+                }
             ))
+            if needsApproval {
+                HStack {
+                    Label("Needs approval in System Settings › General › Login Items",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Button("Open Login Items") { LaunchAtLogin.openLoginItemsSettings() }
+                }
+            }
             LabeledContent("Boost ceiling") {
                 HStack {
                     Slider(value: Binding(
@@ -49,6 +63,7 @@ private struct GeneralTab: View {
         .onAppear {
             let enabled = LaunchAtLogin.isEnabled
             if enabled != controller.global.launchAtLogin { controller.setLaunchAtLogin(enabled) }
+            needsApproval = LaunchAtLogin.needsApproval
         }
     }
 }

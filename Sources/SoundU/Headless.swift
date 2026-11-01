@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 import SoundUCore
 
@@ -87,3 +88,4 @@ enum Headless {
         }
     }
 }
+#endif

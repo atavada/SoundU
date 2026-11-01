@@ -85,7 +85,13 @@ public final class AudioEngine {
         for (uid, specs) in plan.byDevice {
             for spec in specs { wanted[GraphKey(deviceUID: uid, appID: spec.appID)] = spec }
         }
-        for (key, graph) in graphs.sorted(by: { $0.key < $1.key }) where wanted[key] == nil { stop(key, graph) }
+        // A leaving graph on a device that keeps or gains graphs stops after the starts, so the
+        // device never briefly has no graph and 'nodk' is never cleared and set again.
+        let wantedDevices = Set(wanted.keys.map(\.deviceUID))
+        var deferred: [(GraphKey, DeviceGraph)] = []
+        for (key, graph) in graphs.sorted(by: { $0.key < $1.key }) where wanted[key] == nil {
+            if wantedDevices.contains(key.deviceUID) { deferred.append((key, graph)) } else { stop(key, graph) }
+        }
         let stalled = stalledGraphs
 
         let devices = Dictionary(system.outputDevices().map { ($0.uid, $0) }, uniquingKeysWith: { a, _ in a })
@@ -98,6 +104,7 @@ public final class AudioEngine {
                 start(key, device: devices[key.deviceUID], spec: spec)
             }
         }
+        for (key, graph) in deferred { stop(key, graph) }
     }
 
     private func start(_ key: GraphKey, device: OutputDevice?, spec: TapSpec) {

@@ -191,4 +191,17 @@ final class RoutingPlannerTests: XCTestCase {
                        ["com.apple.FaceTime", "com.apple.Music", "com.apple.Safari", "com.apple.widget"])
         XCTAssertEqual(result.excluded, [:])
     }
+
+    /// A /usr/bin tool launched by an app (afplay from Terminal) belongs to that app, not the OS:
+    /// only processes that are their own responsible process (launchd daemons) count.
+    func testToolLaunchedByAppIsNotASystemDaemon() {
+        let afplay = ProcessSnapshot(objectID: 3, pid: 3003, bundleID: nil, executablePath: "/usr/bin/afplay",
+                                     parentPID: 500, responsiblePID: 500, isRunningOutput: true, isRunningInput: false)
+        let result = plan(input([
+            app("com.apple.Terminal", [afplay]),
+            app("systemsoundserverd", [daemon(4, "/usr/sbin/systemsoundserverd")]),
+        ]))
+        XCTAssertEqual(result.byDevice, ["speakers": [TapSpec(appID: "com.apple.Terminal", processObjectIDs: [3])]])
+        XCTAssertEqual(result.excluded, ["systemsoundserverd": .systemProcess])
+    }
 }

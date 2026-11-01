@@ -273,6 +273,26 @@ final class AudioEngineTests: XCTestCase {
         XCTAssertEqual(noDucks(from: mark), [], "already cleared")
     }
 
+    /// One app leaving while another arrives on the same device in one apply must not clear
+    /// 'nodk' even briefly (a ducking window during a call).
+    func testSwapOnDeviceKeepsExemptionWithoutGap() throws {
+        let (engine, fake, _) = makeEngine()
+        engine.setDuckingExempt(true)
+        engine.apply(plan(["speakers": [spec("A", 1)]]))
+        let mark = fake.calls.count
+
+        engine.apply(plan(["speakers": [spec("B", 2)]]))
+
+        XCTAssertNotNil(engine.runningAggregates[key("speakers", "B")])
+        XCTAssertNil(engine.runningAggregates[key("speakers", "A")])
+        XCTAssertFalse(fake.calls[mark...].contains { if case .setNoDuck(_, false) = $0 { true } else { false } },
+                       "\(Array(fake.calls[mark...]))")
+        // Still exempt: the last graph's stop clears it exactly once.
+        let stop = fake.calls.count
+        engine.apply(plan([:]))
+        XCTAssertEqual(fake.calls[stop...].filter { if case .setNoDuck(_, false) = $0 { true } else { false } }.count, 1)
+    }
+
     /// The AudioDeviceDuck fallback follows the same per-device rule.
     func testDuckFallbackIsReferenceCountedPerPhysicalDevice() throws {
         let (engine, fake, _) = makeEngine()

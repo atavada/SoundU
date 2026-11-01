@@ -98,7 +98,8 @@ public func plan(_ input: PlannerInput) -> RoutingPlan {
     return RoutingPlan(byDevice: byDevice.mapValues { $0.sorted { $0.appID < $1.appID } }, excluded: excluded)
 }
 
-/// A bare OS daemon: an executable under /usr/ or /System/ that is not inside an app,
+/// A bare OS daemon: its own responsible process, with an executable under /usr/ or /System/
+/// that is not inside an app,
 /// extension or XPC bundle (Apple's apps live in /System/Applications and WebKit plays
 /// Safari's audio from an XPC service under /System/). Call services (avconferenced,
 /// callservicesd) are not daemons here: they carry FaceTime and Phone audio.
@@ -106,5 +107,7 @@ func isSystemDaemon(_ p: ProcessSnapshot) -> Bool {
     let path = p.executablePath
     guard path.hasPrefix("/usr/") || path.hasPrefix("/System/") else { return false }
     let bundled = [".app/", ".appex/", ".xpc/"].contains { path.contains($0) }
-    return !bundled && !CallServices.isCallProcess(p)
+    // launchd daemons are their own responsible process; a tool an app launched (afplay from
+    // Terminal) is attributed to that app and is not a daemon.
+    return !bundled && p.responsiblePID == p.pid && !CallServices.isCallProcess(p)
 }

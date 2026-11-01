@@ -12,6 +12,8 @@ public enum StripState: Equatable, Sendable {
     case routed
     /// Routed but silent; released when the 5 s linger expires.
     case lingering
+    /// Shown but not tapped until it plays: a pinned app (System Sounds) on a Bluetooth output.
+    case standby
     /// Untouched because `callApp` is in a call.
     case locked(callApp: String)
     case notRouted(Exclusion)
@@ -49,6 +51,15 @@ public struct AppStrip: Identifiable, Equatable {
     }
 }
 
+struct TapError {
+    var message: String
+    var at: Date
+    var processObjectIDs: [AudioObjectID]
+}
+
+/// How long a pinned app's tap failure stands before the tap is tried again.
+let pinnedTapRetryInterval: TimeInterval = 30
+
 /// Glue between the HAL, the planner, the engine and the UI: keeps strips, devices and
 /// permission state current, re-plans on every change, persists settings and drives meters.
 @MainActor
@@ -80,8 +91,9 @@ public final class SoundUController {
     @ObservationIgnored private var settings: SettingsSnapshot
     @ObservationIgnored private var grouping = Grouping()
     @ObservationIgnored private var lastPlayed: [String: Date] = [:]
-    /// App ID → tap error, kept while the app stays a routing candidate.
-    @ObservationIgnored private var tapErrors: [String: String] = [:]
+    /// App ID → tap error, kept while the app stays a routing candidate (a pinned app, always a
+    /// candidate, is retried after 30 s or when its process objects change).
+    @ObservationIgnored private var tapErrors: [String: TapError] = [:]
     @ObservationIgnored private var icons: [String: NSImage] = [:]
     @ObservationIgnored private var observation: AnyObject?
     @ObservationIgnored private var loops: [Task<Void, Never>] = []
@@ -129,6 +141,9 @@ public final class SoundUController {
             Task { @MainActor in self?.handle(event) }
         }
         for (appID, _) in settings.apps { pushGain(appID) }
+        if !system.setSleepingIsAllowed(true) {
+            Self.log.error("Could not allow idle system sleep while IO runs")
+        }
         exemptionAvailable = system.isNoDuckSupported() || duckFallbackAvailable()
 
         observation = system.observe { [weak self] change in
@@ -291,7 +306,7 @@ public final class SoundUController {
         case .ioStalled:
             replan()
         case .tapFailed(let appID, let error):
-            tapErrors[appID] = error
+            tapErrors[appID] = TapError(message: error, at: now(), processObjectIDs: objectIDs(appID))
             replan()
         }
     }
@@ -327,6 +342,10 @@ public final class SoundUController {
         let now = now()
         for app in grouping.apps where app.isPlaying { lastPlayed[app.id] = now }
         lastPlayed = lastPlayed.filter { now.timeIntervalSince($0.value) < lingerInterval }
+        tapErrors = tapErrors.filter { appID, error in
+            appID != SystemSounds.appID || (now.timeIntervalSince(error.at) < pinnedTapRetryInterval
+                                            && error.processObjectIDs == objectIDs(appID))
+        }
 
         let decision = callGuardDecision(now: now)
         if decision.status != callGuard { callGuard = decision.status }
@@ -343,6 +362,10 @@ public final class SoundUController {
         engine.checkIO()
         engine.apply(routing)
         rebuildStrips(routing, activeCallApps: decision.activeCallApps)
+    }
+
+    private func objectIDs(_ appID: String) -> [AudioObjectID] {
+        grouping.apps.first { $0.id == appID }?.processes.map(\.objectID) ?? []
     }
 
     private func rebuildStrips(_ routing: RoutingPlan, activeCallApps: Set<String>) {
@@ -364,6 +387,8 @@ public final class SoundUController {
             } else if routed.contains(app.id) {
                 state = permission == .pending ? .notRouted(.permissionPending)
                     : app.isPlaying || app.isPinned ? .routed : .lingering
+            } else if app.isPinned {
+                state = .standby
             } else {
                 return nil
             }
@@ -397,7 +422,7 @@ public final class SoundUController {
                 .first { activeCallApps.contains($0) }
             return .locked(callApp: callApp ?? app.id)
         case .tapFailed:
-            return .error(tapErrors[app.id] ?? "Could not tap this app")
+            return .error(tapErrors[app.id]?.message ?? "Could not tap this app")
         case .soundU, .systemProcess, .permissionPending:
             return .notRouted(exclusion)
         }

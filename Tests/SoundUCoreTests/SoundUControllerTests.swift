@@ -172,6 +172,96 @@ final class SoundUControllerTests: XCTestCase {
         XCTAssertTrue(saved)
     }
 
+    private var systemSoundsTap: String { "SoundU-\(getpid())-\(SystemSounds.appID)" }
+
+    private func tapAttempts(_ fake: FakeAudioSystem, _ appID: String) -> Int {
+        fake.calls.filter { call in
+            if case .createTap(_, let name) = call { name.hasSuffix("-\(appID)") } else { false }
+        }.count
+    }
+
+    /// A pinned app is always a candidate, so a tap failure is retried after 30 s (not before)
+    /// instead of never.
+    func testPinnedTapFailureRetriedAfterThirtySeconds() async throws {
+        let (controller, fake, _) = try makeController()
+        fake.processList = [systemSoundServer(playing: false)]
+        fake.failingTapNames = [systemSoundsTap]
+        let clock = clocked(controller)
+        controller.start()
+        defer { controller.shutdown() }
+
+        let failed = await waitUntil(1) {
+            if case .error = self.strip(controller, SystemSounds.appID)?.state { true } else { false }
+        }
+        XCTAssertTrue(failed, "strips: \(controller.apps)")
+        let attempts = tapAttempts(fake, SystemSounds.appID)
+        fake.failingTapNames = []
+
+        clock.now = clock.now.addingTimeInterval(29)
+        try await Task.sleep(for: .milliseconds(1300)) // at least one timed re-plan
+        XCTAssertEqual(tapAttempts(fake, SystemSounds.appID), attempts, "not retried before 30 s")
+
+        clock.now = clock.now.addingTimeInterval(1)
+        let retried = await waitUntil(1.5) { self.strip(controller, SystemSounds.appID)?.state == .routed }
+        XCTAssertTrue(retried, "strips: \(controller.apps)")
+        XCTAssertEqual(tapAttempts(fake, SystemSounds.appID), attempts + 1)
+    }
+
+    /// A pinned app's tap failure is also retried at once when its process objects change.
+    func testPinnedTapFailureRetriedWhenProcessesChange() async throws {
+        let (controller, fake, _) = try makeController()
+        fake.processList = [systemSoundServer(playing: false)]
+        fake.failingTapNames = [systemSoundsTap]
+        controller.start()
+        defer { controller.shutdown() }
+        let failed = await waitUntil(1) {
+            if case .error = self.strip(controller, SystemSounds.appID)?.state { true } else { false }
+        }
+        XCTAssertTrue(failed, "strips: \(controller.apps)")
+        fake.failingTapNames = []
+
+        var restarted = systemSoundServer(playing: false)
+        restarted.objectID = 19
+        fake.processList = [restarted]
+        fake.send(.processes)
+        let retried = await waitUntil(1) { self.strip(controller, SystemSounds.appID)?.state == .routed }
+        XCTAssertTrue(retried, "strips: \(controller.apps)")
+    }
+
+    /// On a Bluetooth default output an idle System Sounds is shown on standby, not tapped; it is
+    /// tapped while it plays.
+    func testSystemSoundsOnStandbyOnBluetooth() async throws {
+        let (controller, fake, _) = try makeController()
+        let bt = OutputDevice(id: 30, uid: "bt", name: "AirPods Pro", sampleRate: 48_000, outputChannels: 2,
+                              transport: kAudioDeviceTransportTypeBluetooth)
+        fake.devices = [speakers, bt]
+        fake.defaultUID = "bt"
+        fake.processList = [systemSoundServer(playing: false)]
+        controller.start()
+        defer { controller.shutdown() }
+
+        let standby = await waitUntil(1) { self.strip(controller, SystemSounds.appID)?.state == .standby }
+        XCTAssertTrue(standby, "strips: \(controller.apps)")
+        XCTAssertTrue(StripState.standby.isVisible)
+        XCTAssertFalse(tapped(fake, SystemSounds.appID))
+
+        fake.processList = [systemSoundServer(playing: true)]
+        fake.send(.processes)
+        let routed = await waitUntil(1) {
+            self.strip(controller, SystemSounds.appID)?.state == .routed
+                && controller.engine.runningAggregates[GraphKey(deviceUID: "bt", appID: SystemSounds.appID)] != nil
+        }
+        XCTAssertTrue(routed, "strips: \(controller.apps)")
+    }
+
+    /// SoundU's IO must never block idle system sleep.
+    func testStartAllowsSystemSleep() throws {
+        let (controller, fake, _) = try makeController()
+        controller.start()
+        defer { controller.shutdown() }
+        XCTAssertTrue(fake.calls.contains(.setSleepingIsAllowed(true)))
+    }
+
     /// Other bare daemons are still neither tapped nor shown.
     func testOtherSystemDaemonHasNoVisibleStripAndIsNotTapped() async throws {
         let (controller, fake, _) = try makeController()

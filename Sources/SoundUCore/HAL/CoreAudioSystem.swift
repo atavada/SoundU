@@ -192,6 +192,13 @@ public final class CoreAudioSystem: AudioSystem {
         return HAL.isSettable(dev, HAL.noDuckSelector, kAudioObjectPropertyScopeOutput)
     }
 
+    public func setSleepingIsAllowed(_ allowed: Bool) -> Bool {
+        let status = HAL.setUInt32(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertySleepingIsAllowed,
+                                   kAudioObjectPropertyScopeGlobal, allowed ? 1 : 0)
+        logIfError(status, "set SleepingIsAllowed=\(allowed ? 1 : 0)")
+        return status == noErr
+    }
+
     public func setNoDuck(subDevicesOf agg: AudioObjectID, _ on: Bool) -> Bool {
         let outputs = HAL.objectIDs(agg, kAudioAggregateDevicePropertyActiveSubDeviceList)
             .filter { HAL.channelCount($0, kAudioObjectPropertyScopeOutput) > 0 }

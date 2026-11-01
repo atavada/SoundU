@@ -58,12 +58,17 @@ public final class AudioEngine {
     /// Clock for the IO watchdog; replaceable in tests.
     var now: () -> ContinuousClock.Instant = { .now }
     private static let stallBackoff: Duration = .seconds(5)
+    /// Cap for the growing back-off of a pinned app's graph.
+    private static let maxStallBackoff: Duration = .seconds(60)
     private var graphs: [GraphKey: DeviceGraph] = [:]
     private var volumes: [String: (volume: Float, muted: Bool)] = [:]
     /// IO progress of each running graph (callback count and when it last changed).
     private var watches: [GraphKey: (count: UInt64, since: ContinuousClock.Instant, bluetooth: Bool)] = [:]
     /// When a stalled graph may be started again.
     private var backoff: [GraphKey: ContinuousClock.Instant] = [:]
+    /// Stalls in a row with no IO seen in between, per pinned graph (System Sounds is always
+    /// routed, so on a dead device it would otherwise restart every few seconds forever).
+    private var stallStreak: [GraphKey: Int] = [:]
     private var duckingExempt = false
     /// Physical device UIDs on which the exemption is currently set. 'nodk' belongs to
     /// (this process, physical device), so graphs on one device share it.
@@ -120,7 +125,7 @@ public final class AudioEngine {
         let latency = system.addedLatencyMs(aggregate: graph.aggregate)
         Self.log.info("started \(key, privacy: .public): added latency \(latency) ms")
         onEvent?(.deviceStarted(uid: key.deviceUID, appID: key.appID, addedLatencyMs: latency))
-        watches[key] = (0, now(), device.map { Self.bluetoothTransports.contains($0.transport) } ?? false)
+        watches[key] = (0, now(), device?.isBluetooth ?? false)
     }
 
     /// Clears the exemption only when this is the last graph on its physical device.
@@ -146,9 +151,6 @@ public final class AudioEngine {
 
     // MARK: - IO watchdog
 
-    private static let bluetoothTransports: Set<UInt32> = [kAudioDeviceTransportTypeBluetooth,
-                                                           kAudioDeviceTransportTypeBluetoothLE]
-
     /// Graphs (app on device) that stalled less than 5 s ago; `apply` does not restart them until then.
     public var stalledGraphs: Set<GraphKey> {
         let now = now()
@@ -160,6 +162,7 @@ public final class AudioEngine {
     /// advanced for the IO timeout is torn down (its apps play directly): `.permissionPending`
     /// if no IO was ever seen this run (Bluetooth devices get one extra period first, they can
     /// be slow to start), else `.ioStalled` and that graph (app on device) backs off for 5 s.
+    /// A pinned app's graph backs off 5, 10, 20 … up to 60 s while it keeps stalling without IO.
     public func checkIO() {
         let now = now()
         backoff = backoff.filter { $0.value > now }
@@ -171,6 +174,7 @@ public final class AudioEngine {
                 watch.since = now
                 watches[key] = watch
             }
+            if count > 0 { stallStreak[key] = nil }
             if count > 0 && !permissionConfirmed {
                 permissionConfirmed = true
                 onEvent?(.ioConfirmed(uid: key.deviceUID))
@@ -179,8 +183,14 @@ public final class AudioEngine {
             guard now - watch.since >= limit else { continue }
             stop(key, graph)
             if permissionConfirmed {
-                Self.log.error("IO stalled for \(key, privacy: .public); retrying in 5 s")
-                backoff[key] = now + Self.stallBackoff
+                var wait = Self.stallBackoff
+                if key.appID == SystemSounds.appID {
+                    let streak = stallStreak[key, default: 0]
+                    wait = min(Self.stallBackoff * (1 << min(streak, 4)), Self.maxStallBackoff)
+                    stallStreak[key] = streak + 1
+                }
+                Self.log.error("IO stalled for \(key, privacy: .public); retrying in \(wait, privacy: .public)")
+                backoff[key] = now + wait
                 onEvent?(.ioStalled(uid: key.deviceUID, appID: key.appID))
             } else {
                 Self.log.error("no IO callbacks for \(key, privacy: .public): Audio Capture permission pending")

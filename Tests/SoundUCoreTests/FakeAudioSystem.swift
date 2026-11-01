@@ -17,6 +17,7 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
         case stopIO(aggregate: AudioObjectID)
         case setNoDuck(AudioObjectID, Bool)
         case setBufferFrameSize(AudioObjectID, UInt32)
+        case setSleepingIsAllowed(Bool)
     }
 
     private let lock = NSLock()
@@ -198,6 +199,11 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
     }
 
     func isNoDuckSupported() -> Bool { noDuckSupported }
+
+    func setSleepingIsAllowed(_ allowed: Bool) -> Bool {
+        record(.setSleepingIsAllowed(allowed))
+        return true
+    }
 
     func setNoDuck(subDevicesOf agg: AudioObjectID, _ on: Bool) -> Bool {
         locked {

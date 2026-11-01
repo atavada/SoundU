@@ -68,9 +68,10 @@ let lingerInterval: TimeInterval = 5
 
 /// Decides which apps are tapped onto which device. An app is a candidate while it is playing,
 /// played less than 5 s ago, or is pinned (System Sounds, routed idle so its tap is ready before
-/// a notification starts); other apps are absent from the plan (neither routed nor excluded).
+/// a notification starts) and its target device is not Bluetooth; other apps are absent from
+/// the plan (neither routed nor excluded).
 /// Candidates are excluded, in precedence order, when they are SoundU itself, in an active call,
-/// made only of system daemons (call services excepted), failed to tap, or left with no processes after dropping those shared with an active call app.
+/// made only of system daemons (call services and System Sounds never count), failed to tap, or left with no processes after dropping those shared with an active call app.
 /// Routed apps go to their saved output device when present, else to the default device.
 public func plan(_ input: PlannerInput) -> RoutingPlan {
     let deviceUIDs = Set(input.devices.map(\.uid))
@@ -82,7 +83,11 @@ public func plan(_ input: PlannerInput) -> RoutingPlan {
     var excluded: [String: Exclusion] = [:]
     for app in input.grouping.apps {
         let lingering = input.lastPlayed[app.id].map { input.now.timeIntervalSince($0) < lingerInterval } ?? false
-        guard app.isPlaying || lingering || app.isPinned else { continue }
+        let saved = input.settings.setting(for: app.id).outputDeviceUID
+        let device = saved.flatMap { deviceUIDs.contains($0) ? $0 : nil } ?? input.defaultDeviceUID
+        // Kept routed while idle only off Bluetooth: an idle IOProc would keep AirPods streaming.
+        let pinnedHere = app.isPinned && !(input.devices.first { $0.uid == device }?.isBluetooth ?? false)
+        guard app.isPlaying || lingering || pinnedHere else { continue }
 
         if app.id == input.selfBundleID { excluded[app.id] = .soundU; continue }
         if input.activeCallApps.contains(app.id) { excluded[app.id] = .callInProgress; continue }
@@ -92,8 +97,6 @@ public func plan(_ input: PlannerInput) -> RoutingPlan {
         let objectIDs = app.processes.map(\.objectID).filter { !callShared.contains($0) }.sorted()
         if objectIDs.isEmpty { excluded[app.id] = .sharedWithCall; continue }
 
-        let saved = input.settings.setting(for: app.id).outputDeviceUID
-        let device = saved.flatMap { deviceUIDs.contains($0) ? $0 : nil } ?? input.defaultDeviceUID
         byDevice[device, default: []].append(TapSpec(appID: app.id, processObjectIDs: objectIDs))
     }
     return RoutingPlan(byDevice: byDevice.mapValues { $0.sorted { $0.appID < $1.appID } }, excluded: excluded)

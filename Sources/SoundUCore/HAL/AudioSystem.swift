@@ -32,6 +32,9 @@ public struct OutputDevice: Equatable, Hashable, Sendable {
     public var sampleRate: Double
     public var outputChannels: Int
     public var transport: UInt32
+    public var isBluetooth: Bool {
+        transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+    }
 
     public init(id: AudioObjectID, uid: String, name: String, sampleRate: Double,
                 outputChannels: Int, transport: UInt32) {
@@ -90,6 +93,9 @@ public protocol AudioSystem: AnyObject, Sendable {
     func stopIO(aggregate: AudioObjectID, proc: AudioDeviceIOProcID)
 
     func isNoDuckSupported() -> Bool
+    /// Sets `kAudioHardwarePropertySleepingIsAllowed` so SoundU's running IO never blocks idle
+    /// system sleep; false (and logged) on failure.
+    func setSleepingIsAllowed(_ allowed: Bool) -> Bool
     /// Sets 'nodk' on each output sub-device of `agg`; true only if every set succeeded.
     func setNoDuck(subDevicesOf agg: AudioObjectID, _ on: Bool) -> Bool
     func setBufferFrameSize(_ dev: AudioObjectID, _ frames: UInt32) throws

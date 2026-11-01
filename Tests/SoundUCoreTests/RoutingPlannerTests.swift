@@ -186,6 +186,35 @@ final class RoutingPlannerTests: XCTestCase {
         XCTAssertNil(later.excluded[SystemSounds.appID])
     }
 
+    /// On Bluetooth, an idle System Sounds is not kept routed (it would keep AirPods streaming):
+    /// it routes on demand like any app. Non-Bluetooth devices keep it pinned.
+    func testSystemSoundsRoutesOnDemandOnBluetooth() {
+        let bt = OutputDevice(id: 30, uid: "bt", name: "AirPods Pro", sampleRate: 48_000, outputChannels: 2,
+                              transport: kAudioDeviceTransportTypeBluetooth)
+        let ble = OutputDevice(id: 31, uid: "ble", name: "Buds", sampleRate: 48_000, outputChannels: 2,
+                               transport: kAudioDeviceTransportTypeBluetoothLE)
+        let devices = [speakers, bt, ble]
+        for uid in ["bt", "ble"] {
+            let idle = plan(input([systemSounds(output: false)], devices: devices, defaultUID: uid))
+            XCTAssertEqual(idle.byDevice, [:], uid)
+            XCTAssertEqual(idle.excluded, [:], uid)
+
+            let playing = plan(input([systemSounds(output: true)], devices: devices, defaultUID: uid))
+            XCTAssertEqual(playing.byDevice, [uid: [TapSpec(appID: SystemSounds.appID, processObjectIDs: [3])]])
+            let lingering = plan(input([systemSounds(output: false)], devices: devices, defaultUID: uid,
+                                       lastPlayed: [SystemSounds.appID: now.addingTimeInterval(-2)]))
+            XCTAssertEqual(lingering.byDevice, [uid: [TapSpec(appID: SystemSounds.appID, processObjectIDs: [3])]])
+        }
+        // Saved to Bluetooth while the default is the speakers: on demand.
+        let savedBT = plan(input([systemSounds(output: false)], settings: settings([SystemSounds.appID: "bt"]),
+                                 devices: devices))
+        XCTAssertEqual(savedBT.byDevice, [:])
+        // Saved to the speakers while the default is Bluetooth: pinned.
+        let savedWired = plan(input([systemSounds(output: false)], settings: settings([SystemSounds.appID: "speakers"]),
+                                    devices: devices, defaultUID: "bt"))
+        XCTAssertEqual(savedWired.byDevice, ["speakers": [TapSpec(appID: SystemSounds.appID, processObjectIDs: [3])]])
+    }
+
     func testSystemSoundsFollowsSavedDeviceAndKeepsCallAndFailurePrecedence() {
         let saved = plan(input([systemSounds(output: false)], settings: settings([SystemSounds.appID: "airpods"])))
         XCTAssertEqual(saved.byDevice, ["airpods": [TapSpec(appID: SystemSounds.appID, processObjectIDs: [3])]])

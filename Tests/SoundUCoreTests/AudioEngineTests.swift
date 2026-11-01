@@ -544,4 +544,37 @@ final class AudioEngineTests: XCTestCase {
         XCTAssertNotNil(engine.runningAggregates[key("speakers", "A")], "retried after 5 s")
         engine.stopAll()
     }
+
+    /// A pinned app (System Sounds) on a dead device would restart forever: each stall without IO
+    /// doubles its back-off (5, 10, 20, 40, 60, 60 s); IO seen on it resets it to 5 s.
+    func testPinnedStallBackoffGrowsAndResetsAfterIO() throws {
+        let (engine, fake, _) = makeEngine(ioTimeout: .seconds(2))
+        let clock = watched(engine)
+        let pinned = key("speakers", SystemSounds.appID)
+        let p = plan(["speakers": [spec(SystemSounds.appID, 1)]])
+        engine.apply(p)
+        fake.invokeIO(aggregate: try XCTUnwrap(engine.runningAggregates[pinned]))
+        engine.checkIO()
+
+        for expected in [5.0, 10, 20, 40, 60, 60] {
+            clock.advance(.seconds(2.1))
+            engine.checkIO()
+            XCTAssertNil(engine.runningAggregates[pinned], "stalled")
+            clock.advance(.seconds(expected - 0.5)) // binary-exact margins
+            engine.apply(p)
+            XCTAssertNil(engine.runningAggregates[pinned], "still backing off before \(expected) s")
+            clock.advance(.seconds(0.5))
+            engine.apply(p)
+            XCTAssertNotNil(engine.runningAggregates[pinned], "retried after \(expected) s")
+        }
+
+        fake.invokeIO(aggregate: try XCTUnwrap(engine.runningAggregates[pinned]))
+        engine.checkIO()
+        clock.advance(.seconds(2.1))
+        engine.checkIO()
+        clock.advance(.seconds(5))
+        engine.apply(p)
+        XCTAssertNotNil(engine.runningAggregates[pinned], "back to 5 s after IO was seen")
+        engine.stopAll()
+    }
 }

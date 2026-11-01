@@ -59,7 +59,7 @@ struct ChannelStrip: View {
     @ViewBuilder
     private var status: some View {
         switch strip.state {
-        case .routed, .lingering:
+        case .routed, .lingering, .standby:
             Text("\(Int((strip.volume * 100).rounded()))%")
                 .font(.caption.monospacedDigit())
         case .locked:

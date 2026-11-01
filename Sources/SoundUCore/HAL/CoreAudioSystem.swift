@@ -10,7 +10,12 @@ public final class CoreAudioSystem: AudioSystem {
     /// Our own private aggregates; hidden from `outputDevices()`.
     static let aggregateUIDPrefix = "SoundU-Agg-"
 
-    public init() {}
+    /// Drift compensation on each sub-tap (on in the product; off only for latency diagnostics).
+    private let tapDriftCompensation: UInt32
+
+    public init(tapDriftCompensation: Bool = true) {
+        self.tapDriftCompensation = tapDriftCompensation ? 1 : 0
+    }
 
     // MARK: - Enumeration
 
@@ -89,7 +94,7 @@ public final class CoreAudioSystem: AudioSystem {
             kAudioAggregateDeviceTapAutoStartKey: 1,
             kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: deviceUID]],
             kAudioAggregateDeviceTapListKey: tapUIDs.map {
-                [kAudioSubTapDriftCompensationKey: 1, kAudioSubTapUIDKey: $0] as [String: Any]
+                [kAudioSubTapDriftCompensationKey: tapDriftCompensation, kAudioSubTapUIDKey: $0] as [String: Any]
             },
         ]
         var agg = AudioObjectID(kAudioObjectUnknown)
@@ -116,7 +121,8 @@ public final class CoreAudioSystem: AudioSystem {
         try check(status, "set tap list on aggregate \(agg)")
         // Sub-taps added via the property start without drift compensation.
         for subTap in HAL.objectIDs(agg, kAudioAggregateDevicePropertySubTapList) {
-            logIfError(HAL.setUInt32(subTap, kAudioSubTapPropertyDriftCompensation, kAudioObjectPropertyScopeGlobal, 1),
+            logIfError(HAL.setUInt32(subTap, kAudioSubTapPropertyDriftCompensation, kAudioObjectPropertyScopeGlobal,
+                                     tapDriftCompensation),
                        "enable drift compensation on sub-tap \(subTap)")
         }
     }

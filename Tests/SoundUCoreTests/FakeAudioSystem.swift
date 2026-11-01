@@ -23,6 +23,7 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
     private var _defaultUID: String?
     private var _calls: [Call] = []
     private var _failingTapNames: Set<String> = []
+    private var _failingAggregateDeviceUIDs: Set<String> = []
     private var _runningBundleIDs: Set<String> = []
     private var _noDuckSupported = true
     private var _noDuckSucceeds = true
@@ -54,6 +55,10 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
         get { locked { _failingTapNames } }
         set { locked { _failingTapNames = newValue } }
     }
+    var failingAggregateDeviceUIDs: Set<String> {
+        get { locked { _failingAggregateDeviceUIDs } }
+        set { locked { _failingAggregateDeviceUIDs = newValue } }
+    }
     var runningBundleIDs: Set<String> {
         get { locked { _runningBundleIDs } }
         set { locked { _runningBundleIDs = newValue } }
@@ -80,11 +85,17 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
 
     /// Runs the IOProc blocks registered on `aggregate` once, with empty buffer lists.
     func invokeIO(aggregate: AudioObjectID) {
-        let blocks = locked { ioBlocks.values.filter { $0.aggregate == aggregate }.map(\.block) }
-        var time = AudioTimeStamp()
         var input = AudioBufferList()
         var output = AudioBufferList()
-        for block in blocks { block(&time, &input, &time, &output, &time) }
+        invokeIO(aggregate: aggregate, input: &input, output: &output)
+    }
+
+    /// Runs the IOProc blocks registered on `aggregate` once with the given buffers.
+    func invokeIO(aggregate: AudioObjectID, input: UnsafePointer<AudioBufferList>,
+                  output: UnsafeMutablePointer<AudioBufferList>) {
+        let blocks = locked { ioBlocks.values.filter { $0.aggregate == aggregate }.map(\.block) }
+        var time = AudioTimeStamp()
+        for block in blocks { block(&time, input, &time, output, &time) }
     }
 
     // MARK: - AudioSystem
@@ -112,8 +123,11 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
     func destroyTap(_ tap: AudioObjectID) { record(.destroyTap(tap)) }
 
     func createAggregate(deviceUID: String, tapUIDs: [String]) throws -> AudioObjectID {
-        locked {
+        try locked {
             _calls.append(.createAggregate(deviceUID: deviceUID, tapUIDs: tapUIDs))
+            if _failingAggregateDeviceUIDs.contains(deviceUID) {
+                throw AudioSystemError("create aggregate on \(deviceUID)", kAudioHardwareBadDeviceError)
+            }
             return allocateID()
         }
     }

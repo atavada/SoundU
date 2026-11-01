@@ -59,6 +59,9 @@ public final class SoundUController {
     /// it without redrawing on every per-app change.
     public private(set) var global: GlobalSettings
 
+    /// What the Call Guard pill and the menu-bar dot show; recomputed on every re-plan.
+    public private(set) var callGuard: CallGuardStatus = .off
+
     /// Upper fader limit (100–200 %).
     public var boostCeiling: Float { global.boostCeiling }
 
@@ -76,6 +79,13 @@ public final class SoundUController {
     @ObservationIgnored private var observation: AnyObject?
     @ObservationIgnored private var loops: [Task<Void, Never>] = []
     @ObservationIgnored private var pendingSave: Task<Void, Never>?
+    /// Whether `AudioDeviceDuck` resolves; replaceable in tests.
+    @ObservationIgnored var duckFallbackAvailable: () -> Bool = { HAL.audioDeviceDuck() != nil }
+    /// 'nodk' settable or `AudioDeviceDuck` present; computed once in `start()`.
+    @ObservationIgnored private var exemptionAvailable = false
+    /// Last exemption handed to the engine (the engine starts with none).
+    @ObservationIgnored private var duckingExempt = false
+    @ObservationIgnored private var voiceOver: (running: Bool, checked: Date)?
 
     private static let log = Logger(subsystem: "com.example.SoundU", category: "Controller")
     private static let saveDelay: Duration = .milliseconds(500)
@@ -108,6 +118,7 @@ public final class SoundUController {
             Task { @MainActor in self?.handle(event) }
         }
         for (appID, _) in settings.apps { pushGain(appID) }
+        exemptionAvailable = system.isNoDuckSupported() || duckFallbackAvailable()
 
         observation = system.observe { [weak self] change in
             guard change != .processes else { return }
@@ -204,9 +215,15 @@ public final class SoundUController {
     /// Persists the flag only; registering with `SMAppService` is the app's job.
     public func setLaunchAtLogin(_ on: Bool) { changeGlobal { $0.launchAtLogin = on } }
 
-    public func setCallGuardEnabled(_ on: Bool) { changeGlobal { $0.callGuardEnabled = on } }
+    public func setCallGuardEnabled(_ on: Bool) {
+        changeGlobal { $0.callGuardEnabled = on }
+        replanIfStarted()
+    }
 
-    public func setCallApps(_ bundleIDs: [String]) { changeGlobal { $0.callApps = bundleIDs } }
+    public func setCallApps(_ bundleIDs: [String]) {
+        changeGlobal { $0.callApps = bundleIDs }
+        replanIfStarted()
+    }
 
     public func resetCallApps() { setCallApps(GlobalSettings().callApps) }
 
@@ -267,11 +284,31 @@ public final class SoundUController {
 
     // MARK: - Planning
 
+    /// Call Guard changes show at once instead of on the next timed re-plan.
+    private func replanIfStarted() {
+        if !loops.isEmpty { replan() }
+    }
+
+    private func callGuardDecision(now: Date) -> CallGuardDecision {
+        evaluateCallGuard(enabled: settings.global.callGuardEnabled,
+                          callApps: Set(settings.global.callApps), grouping: grouping,
+                          voiceOverRunning: isVoiceOverRunning(now: now),
+                          exemptionAvailable: exemptionAvailable)
+    }
+
+    /// Checked at most once per second: it runs on the main actor.
+    private func isVoiceOverRunning(now: Date) -> Bool {
+        if let voiceOver, now.timeIntervalSince(voiceOver.checked) < 1 { return voiceOver.running }
+        let running = system.isProcessRunning(bundleID: "com.apple.VoiceOver")
+        voiceOver = (running, now)
+        return running
+    }
+
     /// Everything the planner needs right now; nil when there is no default output device.
-    private func plannerInput(now: Date) -> PlannerInput? {
+    private func plannerInput(now: Date, activeCallApps: Set<String>) -> PlannerInput? {
         guard let defaultDeviceUID else { return nil }
         return PlannerInput(grouping: grouping, settings: settings, devices: devices,
-                            defaultDeviceUID: defaultDeviceUID, activeCallApps: [],
+                            defaultDeviceUID: defaultDeviceUID, activeCallApps: activeCallApps,
                             lastPlayed: lastPlayed, now: now, selfBundleID: selfBundleID,
                             failedApps: Set(tapErrors.keys))
     }
@@ -281,12 +318,20 @@ public final class SoundUController {
         for app in grouping.apps where app.isPlaying { lastPlayed[app.id] = now }
         lastPlayed = lastPlayed.filter { now.timeIntervalSince($0.value) < lingerInterval }
 
-        let input = plannerInput(now: now)
+        let decision = callGuardDecision(now: now)
+        if decision.status != callGuard { callGuard = decision.status }
+        // Before `apply`, so graphs started now get the exemption as they start.
+        if decision.exemptOutput != duckingExempt {
+            duckingExempt = decision.exemptOutput
+            engine.setDuckingExempt(duckingExempt)
+        }
+
+        let input = plannerInput(now: now, activeCallApps: decision.activeCallApps)
         let routing = input.map(plan) ?? RoutingPlan(byDevice: [:], excluded: [:])
         // A failed app is retried once it stops being a candidate (silent past the linger).
         tapErrors = tapErrors.filter { routing.excluded[$0.key] == .tapFailed }
         engine.apply(routing)
-        rebuildStrips(routing, activeCallApps: input?.activeCallApps ?? [])
+        rebuildStrips(routing, activeCallApps: decision.activeCallApps)
     }
 
     private func rebuildStrips(_ routing: RoutingPlan, activeCallApps: Set<String>) {
@@ -294,7 +339,10 @@ public final class SoundUController {
 
         let strips = grouping.apps.compactMap { app -> AppStrip? in
             let state: StripState
-            if let exclusion = routing.excluded[app.id] {
+            if activeCallApps.contains(app.id) {
+                // Locked even when the planner did not list it (a silent call app).
+                state = .locked(callApp: app.id)
+            } else if let exclusion = routing.excluded[app.id] {
                 state = stripState(app, exclusion, activeCallApps)
             } else if routed.contains(app.id) {
                 state = permission == .pending ? .notRouted(.permissionPending)

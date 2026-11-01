@@ -32,12 +32,7 @@ struct PanelView: View {
         HStack(spacing: 8) {
             Text("SoundU").font(.headline)
             Spacer()
-            // Placeholder until Call Guard gets its own pill and menu.
-            Label("Call Guard", systemImage: "shield")
-                .font(.caption)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(.quaternary, in: Capsule())
+            CallGuardPill(controller: controller)
             Menu {
                 Button("Settings…") {
                     openSettings()

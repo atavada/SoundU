@@ -237,6 +237,87 @@ final class SoundUControllerTests: XCTestCase {
         XCTAssertEqual(store.load().global.callApps, defaults)
     }
 
+    // MARK: - Call Guard
+
+    private let whatsAppID = "net.whatsapp.WhatsApp"
+
+    /// A WhatsApp process (not a running app here, so it groups under its own bundle ID).
+    private func whatsAppProcess(inCall: Bool) -> ProcessSnapshot {
+        ProcessSnapshot(objectID: 2, pid: 300, bundleID: whatsAppID,
+                        executablePath: "/Applications/WhatsApp.app/Contents/MacOS/WhatsApp",
+                        parentPID: 1, responsiblePID: 300, isRunningOutput: inCall, isRunningInput: inCall)
+    }
+
+    private func noDuckCalls(_ fake: FakeAudioSystem) -> [FakeAudioSystem.Call] {
+        fake.calls.filter { if case .setNoDuck = $0 { true } else { false } }
+    }
+
+    func testCallLocksCallAppAndKeepsOutputExempt() async throws {
+        let (controller, fake, _) = try makeController()
+        controller.start()
+        defer { controller.shutdown() }
+        let on = await waitUntil(1) {
+            controller.callGuard == .on && controller.engine.runningAggregates["speakers"] != nil
+        }
+        XCTAssertTrue(on, "status: \(controller.callGuard)")
+        let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
+        XCTAssertEqual(noDuckCalls(fake), [.setNoDuck(agg, true)], "exempt whenever SoundU plays")
+
+        fake.processList = [process(1, owner: spotify, playing: true), whatsAppProcess(inCall: true)]
+        fake.send(.processes)
+
+        let protecting = await waitUntil(1) { controller.callGuard == .protecting(appName: "WhatsApp") }
+        XCTAssertTrue(protecting, "status: \(controller.callGuard)")
+        XCTAssertEqual(strip(controller, whatsAppID)?.state, .locked(callApp: whatsAppID))
+        XCTAssertFalse(fake.calls.contains { call in
+            if case .createTap(_, let name) = call { name.contains(whatsAppID) } else { false }
+        }, "the call app is never tapped")
+        try? await Task.sleep(for: .milliseconds(1100)) // at least one timed re-plan
+        XCTAssertEqual(noDuckCalls(fake), [.setNoDuck(agg, true)], "exemption is set only when it changes")
+
+        fake.processList = [process(1, owner: spotify, playing: true), whatsAppProcess(inCall: false)]
+        fake.send(.processes)
+
+        let ended = await waitUntil(1) { controller.callGuard == .on }
+        XCTAssertTrue(ended, "status: \(controller.callGuard)")
+        // It played seconds ago, so it lingers (routed) like any app until the 5 s linger ends.
+        XCTAssertEqual(strip(controller, whatsAppID)?.state, .lingering, "unlocked after the call")
+    }
+
+    func testVoiceOverAndDisablingDropTheExemption() async throws {
+        let (controller, fake, _) = try makeController()
+        controller.start()
+        defer { controller.shutdown() }
+        let started = await waitUntil(1) { controller.engine.runningAggregates["speakers"] != nil }
+        XCTAssertTrue(started)
+        let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
+
+        fake.runningBundleIDs = ["com.apple.VoiceOver"]
+        let dropped = await waitUntil(2.5) { self.noDuckCalls(fake).last == .setNoDuck(agg, false) }
+        XCTAssertTrue(dropped, "calls: \(noDuckCalls(fake))")
+        XCTAssertEqual(controller.callGuard, .on, "VoiceOver keeps Call Guard on; only the exemption is skipped")
+
+        fake.runningBundleIDs = []
+        let restored = await waitUntil(2.5) { self.noDuckCalls(fake).last == .setNoDuck(agg, true) }
+        XCTAssertTrue(restored, "calls: \(noDuckCalls(fake))")
+
+        controller.setCallGuardEnabled(false)
+        XCTAssertEqual(controller.callGuard, .off, "status follows the toggle at once")
+        XCTAssertEqual(noDuckCalls(fake).last, .setNoDuck(agg, false))
+    }
+
+    func testUnavailableWithoutAnyExemptionMechanism() async throws {
+        let (controller, fake, _) = try makeController()
+        fake.noDuckSupported = false
+        controller.duckFallbackAvailable = { false }
+        controller.start()
+        defer { controller.shutdown() }
+
+        let unavailable = await waitUntil(1) { controller.callGuard == .unavailable }
+        XCTAssertTrue(unavailable, "status: \(controller.callGuard)")
+        XCTAssertTrue(noDuckCalls(fake).isEmpty)
+    }
+
     func testFirstRunAndLaunchAtLoginFlagsPersist() throws {
         let (controller, _, store) = try makeController()
         XCTAssertFalse(controller.global.firstRunDone)

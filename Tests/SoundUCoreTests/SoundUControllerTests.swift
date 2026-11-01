@@ -124,21 +124,68 @@ final class SoundUControllerTests: XCTestCase {
         XCTAssertEqual(strip(controller, spotifyID)?.outputDeviceUID, "airpods", "saved preference is kept")
     }
 
-    /// A notification sound (systemsoundserverd) is neither tapped nor shown.
-    func testSystemSoundServerHasNoVisibleStripAndIsNotTapped() async throws {
+    private func systemSoundServer(playing: Bool) -> ProcessSnapshot {
+        ProcessSnapshot(objectID: 9, pid: 950, bundleID: nil, executablePath: "/usr/sbin/systemsoundserverd",
+                        parentPID: 1, responsiblePID: 950, isRunningOutput: playing, isRunningInput: false)
+    }
+
+    /// System Sounds is always shown and tapped, idle or playing; it sorts after playing apps and
+    /// before lingering ones, and its volume persists and reaches its own graph.
+    func testSystemSoundsAlwaysVisibleRoutedAndAdjustable() async throws {
+        let (controller, fake, store) = try makeController()
+        fake.processList = [process(1, owner: spotify, playing: true), systemSoundServer(playing: false)]
+        let clock = clocked(controller)
+        controller.start()
+        defer { controller.shutdown() }
+
+        let key = GraphKey(deviceUID: "speakers", appID: SystemSounds.appID)
+        let ready = await waitUntil(1) {
+            self.strip(controller, SystemSounds.appID)?.state == .routed
+                && controller.engine.runningAggregates[key] != nil
+        }
+        XCTAssertTrue(ready, "strips: \(controller.apps)")
+        let idle = try XCTUnwrap(strip(controller, SystemSounds.appID))
+        XCTAssertEqual(idle.name, "System Sounds")
+        XCTAssertEqual(idle.fallbackSymbol, "bell.fill")
+        XCTAssertEqual(controller.apps.filter(\.state.isVisible).map(\.id), [spotifyID, SystemSounds.appID])
+
+        // Spotify stops: it lingers below System Sounds; long after, System Sounds is still routed.
+        fake.processList = [process(1, owner: spotify, playing: false), systemSoundServer(playing: false)]
+        fake.send(.processes)
+        let lingering = await waitUntil(1) { self.strip(controller, self.spotifyID)?.state == .lingering }
+        XCTAssertTrue(lingering, "strips: \(controller.apps)")
+        XCTAssertEqual(controller.apps.map(\.id), [SystemSounds.appID, spotifyID])
+        clock.now = clock.now.addingTimeInterval(10)
+        let spotifyGone = await waitUntil(2) { self.strip(controller, self.spotifyID) == nil }
+        XCTAssertTrue(spotifyGone, "strips: \(controller.apps)")
+        XCTAssertEqual(strip(controller, SystemSounds.appID)?.state, .routed)
+
+        // Playing: still one routed strip on the same graph.
+        fake.processList = [systemSoundServer(playing: true)]
+        fake.send(.processes)
+        let agg = try XCTUnwrap(controller.engine.runningAggregates[key])
+        XCTAssertEqual(strip(controller, SystemSounds.appID)?.state, .routed)
+
+        controller.setVolume(SystemSounds.appID, 0.3)
+        XCTAssertEqual(render(fake, agg, input: 0.5, cycles: 20), 0.15, accuracy: 0.001)
+        let saved = await waitUntil(1.5) { store.load().setting(for: SystemSounds.appID).volume == 0.3 }
+        XCTAssertTrue(saved)
+    }
+
+    /// Other bare daemons are still neither tapped nor shown.
+    func testOtherSystemDaemonHasNoVisibleStripAndIsNotTapped() async throws {
         let (controller, fake, _) = try makeController()
-        let notifier = ProcessSnapshot(objectID: 9, pid: 950, bundleID: nil,
-                                       executablePath: "/usr/sbin/systemsoundserverd", parentPID: 1,
-                                       responsiblePID: 950, isRunningOutput: true, isRunningInput: false)
-        fake.processList = [process(1, owner: spotify, playing: true), notifier]
+        let daemon = ProcessSnapshot(objectID: 9, pid: 950, bundleID: nil, executablePath: "/usr/sbin/somedaemond",
+                                     parentPID: 1, responsiblePID: 950, isRunningOutput: true, isRunningInput: false)
+        fake.processList = [process(1, owner: spotify, playing: true), daemon]
         controller.start()
         defer { controller.shutdown() }
 
         let routed = await waitUntil(1) { self.strip(controller, self.spotifyID)?.state == .routed }
         XCTAssertTrue(routed, "strips: \(controller.apps)")
-        XCTAssertEqual(strip(controller, "systemsoundserverd")?.state, .notRouted(.systemProcess))
+        XCTAssertEqual(strip(controller, "somedaemond")?.state, .notRouted(.systemProcess))
         XCTAssertEqual(controller.apps.filter(\.state.isVisible).map(\.id), [spotifyID])
-        XCTAssertFalse(tapped(fake, "systemsoundserverd"))
+        XCTAssertFalse(tapped(fake, "somedaemond"))
     }
 
     func testRecentlySilentAppShownLingering() async throws {

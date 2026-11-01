@@ -52,7 +52,7 @@ struct ChannelStrip: View {
         if let image = strip.icon {
             Image(nsImage: image).resizable().frame(width: 28, height: 28)
         } else {
-            Image(systemName: "app.dashed").font(.system(size: 22)).frame(width: 28, height: 28)
+            Image(systemName: strip.fallbackSymbol).font(.system(size: 22)).frame(width: 28, height: 28)
         }
     }
 

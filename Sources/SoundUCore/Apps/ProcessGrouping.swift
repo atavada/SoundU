@@ -22,6 +22,8 @@ public struct AudioApp: Equatable, Identifiable, Sendable {
     /// Sorted by `objectID`.
     public var processes: [ProcessSnapshot]
     public var isPlaying: Bool { processes.contains { $0.isRunningOutput } }
+    /// Always shown and routed, playing or not (System Sounds).
+    public var isPinned: Bool { id == SystemSounds.appID }
 
     public init(id: String, name: String, processes: [ProcessSnapshot]) {
         self.id = id
@@ -56,11 +58,23 @@ enum CallServices {
     }
 }
 
+/// systemsoundserverd plays notification and alert sounds. It is a pinned app: always shown and
+/// always routed, so the owner's volume applies from a sound's first sample.
+public enum SystemSounds {
+    public static let executablePath = "/usr/sbin/systemsoundserverd"
+    public static let appID = "systemsoundserverd"
+    public static let name = "System Sounds"
+    public static let symbol = "bell.fill"
+
+    static func isServer(_ p: ProcessSnapshot) -> Bool { p.executablePath == executablePath }
+}
+
 func executableName(_ p: ProcessSnapshot) -> String {
     (p.executablePath as NSString).lastPathComponent
 }
 
 /// Groups Core Audio processes into apps. Owner = first match of:
+/// 0. systemsoundserverd (by executable path) → System Sounds;
 /// 1. `avconferenced` / `callservicesd` → FaceTime (shared with every running call-capable app);
 /// 2. the responsible PID is a running app;
 /// 3. walking parent PIDs (through other audio processes) reaches a running app;
@@ -92,6 +106,9 @@ public func groupProcesses(_ procs: [ProcessSnapshot], runningApps: [RunningApp]
 
     /// Primary owner (ID and display name) plus every owner, the primary included.
     func owners(_ p: ProcessSnapshot) -> (id: String, name: String, all: Set<String>) {
+        if SystemSounds.isServer(p) {
+            return (SystemSounds.appID, SystemSounds.name, [SystemSounds.appID])
+        }
         if CallServices.isCallProcess(p) {
             let id = CallServices.faceTime
             let running = Set(runningApps.map(\.bundleID)).intersection(CallServices.sharingApps)

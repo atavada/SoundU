@@ -35,7 +35,7 @@ public struct PlannerInput: Sendable {
 public enum Exclusion: Equatable, Sendable {
     case callInProgress, sharedWithCall, soundU, tapFailed
     /// Every process is a bare system daemon (under /usr/ or /System/, outside any app or XPC
-    /// bundle), e.g. systemsoundserverd playing notification sounds. Never routed or shown.
+    /// bundle). Never routed or shown. systemsoundserverd (System Sounds) never counts.
     case systemProcess
     /// Set by the controller while Audio Capture permission is pending; never emitted by `plan`.
     case permissionPending
@@ -66,8 +66,9 @@ public struct RoutingPlan: Equatable, Sendable {
 /// How long an app stays routed after it stops playing.
 let lingerInterval: TimeInterval = 5
 
-/// Decides which apps are tapped onto which device. An app is a candidate while it is playing
-/// or played less than 5 s ago; other apps are absent from the plan (neither routed nor excluded).
+/// Decides which apps are tapped onto which device. An app is a candidate while it is playing,
+/// played less than 5 s ago, or is pinned (System Sounds, routed idle so its tap is ready before
+/// a notification starts); other apps are absent from the plan (neither routed nor excluded).
 /// Candidates are excluded, in precedence order, when they are SoundU itself, in an active call,
 /// made only of system daemons (call services excepted), failed to tap, or left with no processes after dropping those shared with an active call app.
 /// Routed apps go to their saved output device when present, else to the default device.
@@ -81,7 +82,7 @@ public func plan(_ input: PlannerInput) -> RoutingPlan {
     var excluded: [String: Exclusion] = [:]
     for app in input.grouping.apps {
         let lingering = input.lastPlayed[app.id].map { input.now.timeIntervalSince($0) < lingerInterval } ?? false
-        guard app.isPlaying || lingering else { continue }
+        guard app.isPlaying || lingering || app.isPinned else { continue }
 
         if app.id == input.selfBundleID { excluded[app.id] = .soundU; continue }
         if input.activeCallApps.contains(app.id) { excluded[app.id] = .callInProgress; continue }
@@ -102,10 +103,11 @@ public func plan(_ input: PlannerInput) -> RoutingPlan {
 /// that is not inside an app,
 /// extension or XPC bundle (Apple's apps live in /System/Applications and WebKit plays
 /// Safari's audio from an XPC service under /System/). Call services (avconferenced,
-/// callservicesd) are not daemons here: they carry FaceTime and Phone audio.
+/// callservicesd) are not daemons here: they carry FaceTime and Phone audio; nor is
+/// systemsoundserverd, which is the pinned System Sounds app.
 func isSystemDaemon(_ p: ProcessSnapshot) -> Bool {
     let path = p.executablePath
-    guard path.hasPrefix("/usr/") || path.hasPrefix("/System/") else { return false }
+    guard path.hasPrefix("/usr/") || path.hasPrefix("/System/"), !SystemSounds.isServer(p) else { return false }
     let bundled = [".app/", ".appex/", ".xpc/"].contains { path.contains($0) }
     // launchd daemons are their own responsible process; a tool an app launched (afplay from
     // Terminal) is attributed to that app and is not a daemon.

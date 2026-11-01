@@ -146,17 +146,57 @@ final class RoutingPlannerTests: XCTestCase {
                         isRunningOutput: output, isRunningInput: false)
     }
 
-    /// Notification sounds (systemsoundserverd) are never routed: re-tapping a shared aggregate
-    /// for a one-second sound glitched every other app.
+    /// Bare OS daemons other than System Sounds are never routed or shown.
     func testSystemDaemonOnlyAppExcluded() {
         let result = plan(input([
-            app("systemsoundserverd", [daemon(3, "/usr/sbin/systemsoundserverd")]),
+            app("coreaudiod.thing", [daemon(3, "/usr/sbin/somedaemond")]),
             app("com.apple.coreaudio.thing", [daemon(4, "/System/Library/Frameworks/X.framework/thing")]),
             app("com.apple.Music", [proc(2)]),
         ]))
         XCTAssertEqual(result.byDevice, ["speakers": [TapSpec(appID: "com.apple.Music", processObjectIDs: [2])]])
-        XCTAssertEqual(result.excluded, ["systemsoundserverd": .systemProcess,
+        XCTAssertEqual(result.excluded, ["coreaudiod.thing": .systemProcess,
                                          "com.apple.coreaudio.thing": .systemProcess])
+    }
+
+    // MARK: - System Sounds (pinned)
+
+    private func systemSounds(output: Bool, responsible: pid_t? = nil) -> AudioApp {
+        let p = ProcessSnapshot(objectID: 3, pid: 1003, bundleID: nil, executablePath: SystemSounds.executablePath,
+                                parentPID: 1, responsiblePID: responsible ?? 1003,
+                                isRunningOutput: output, isRunningInput: false)
+        return AudioApp(id: SystemSounds.appID, name: SystemSounds.name, processes: [p])
+    }
+
+    /// System Sounds is routed while idle with no lastPlayed, so its tap exists before a
+    /// notification starts; it is never treated as a system daemon.
+    func testIdleSystemSoundsIsAlwaysRouted() {
+        let expected = ["speakers": [TapSpec(appID: SystemSounds.appID, processObjectIDs: [3])]]
+        for responsible: pid_t in [1003, 77] {
+            let idle = plan(input([systemSounds(output: false, responsible: responsible)]))
+            XCTAssertEqual(idle.byDevice, expected)
+            XCTAssertEqual(idle.excluded, [:])
+        }
+        let playing = plan(input([systemSounds(output: true)]))
+        XCTAssertEqual(playing.byDevice, expected)
+
+        // Still routed 10 s after it last played.
+        let later = plan(input([systemSounds(output: false)],
+                               lastPlayed: [SystemSounds.appID: now.addingTimeInterval(-10)]))
+        XCTAssertEqual(later.byDevice, expected)
+        XCTAssertNil(later.excluded[SystemSounds.appID])
+    }
+
+    func testSystemSoundsFollowsSavedDeviceAndKeepsCallAndFailurePrecedence() {
+        let saved = plan(input([systemSounds(output: false)], settings: settings([SystemSounds.appID: "airpods"])))
+        XCTAssertEqual(saved.byDevice, ["airpods": [TapSpec(appID: SystemSounds.appID, processObjectIDs: [3])]])
+
+        let shared = plan(input([systemSounds(output: false)], shared: [3: [SystemSounds.appID, "com.apple.FaceTime"]],
+                                calls: ["com.apple.FaceTime"]))
+        XCTAssertEqual(shared.excluded, [SystemSounds.appID: .sharedWithCall])
+
+        let failed = plan(input([systemSounds(output: false)], failed: [SystemSounds.appID]))
+        XCTAssertEqual(failed.byDevice, [:])
+        XCTAssertEqual(failed.excluded, [SystemSounds.appID: .tapFailed])
     }
 
     /// An app with at least one non-system process is routed whole; call services never count as
@@ -199,9 +239,9 @@ final class RoutingPlannerTests: XCTestCase {
                                      parentPID: 500, responsiblePID: 500, isRunningOutput: true, isRunningInput: false)
         let result = plan(input([
             app("com.apple.Terminal", [afplay]),
-            app("systemsoundserverd", [daemon(4, "/usr/sbin/systemsoundserverd")]),
+            app("somedaemond", [daemon(4, "/usr/sbin/somedaemond")]),
         ]))
         XCTAssertEqual(result.byDevice, ["speakers": [TapSpec(appID: "com.apple.Terminal", processObjectIDs: [3])]])
-        XCTAssertEqual(result.excluded, ["systemsoundserverd": .systemProcess])
+        XCTAssertEqual(result.excluded, ["somedaemond": .systemProcess])
     }
 }

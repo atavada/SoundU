@@ -144,6 +144,23 @@ final class ProcessGroupingTests: XCTestCase {
         XCTAssertEqual(app("beeper", in: grouping)?.isPlaying, false)
     }
 
+    /// systemsoundserverd is always the "System Sounds" app, matched by executable path, even
+    /// when its responsible PID is a running app.
+    func testSystemSoundServerIsSystemSounds() {
+        let procs = [
+            proc(1, pid: 960, bundleID: nil, exe: "/usr/sbin/systemsoundserverd", responsible: chrome.pid),
+            proc(2, pid: 961, bundleID: "com.apple.systemsound", exe: "/usr/sbin/systemsoundserverd"),
+            proc(3, pid: 100, bundleID: "com.google.Chrome", exe: "/Applications/Chrome.app/Contents/MacOS/Chrome"),
+        ]
+        let grouping = groupProcesses(procs, runningApps: [chrome])
+
+        XCTAssertEqual(SystemSounds.appID, "systemsoundserverd")
+        XCTAssertEqual(app("systemsoundserverd", in: grouping)?.name, "System Sounds")
+        XCTAssertEqual(app("systemsoundserverd", in: grouping)?.processes.map(\.objectID), [1, 2])
+        XCTAssertEqual(app("com.google.Chrome", in: grouping)?.processes.map(\.objectID), [3])
+        XCTAssertEqual(grouping.sharedOwners, [:])
+    }
+
     func testSpotifyAndMusicStandalone() {
         let procs = [
             proc(1, pid: 500, bundleID: "com.spotify.client", exe: "/Applications/Spotify.app/Contents/MacOS/Spotify", output: true),

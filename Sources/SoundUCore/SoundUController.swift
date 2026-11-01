@@ -18,7 +18,7 @@ public enum StripState: Equatable, Sendable {
     /// Tapping failed; the app plays directly.
     case error(String)
 
-    /// SoundU's own audio and system daemons (notification sounds) are never shown as strips.
+    /// SoundU's own audio and bare system daemons are never shown as strips.
     public var isVisible: Bool {
         self != .notRouted(.soundU) && self != .notRouted(.systemProcess)
     }
@@ -34,6 +34,8 @@ public struct AppStrip: Identifiable, Equatable {
     /// Saved preference (nil = default device), even when that device is absent.
     public var outputDeviceUID: String?
     public var state: StripState
+    /// SF Symbol the panel shows when `icon` is nil.
+    public var fallbackSymbol: String { id == SystemSounds.appID ? SystemSounds.symbol : "app.dashed" }
 
     public init(id: String, name: String, icon: NSImage?, volume: Float, muted: Bool,
                 outputDeviceUID: String?, state: StripState) {
@@ -361,7 +363,7 @@ public final class SoundUController {
                 state = .error("The output device stopped responding; retrying shortly")
             } else if routed.contains(app.id) {
                 state = permission == .pending ? .notRouted(.permissionPending)
-                    : app.isPlaying ? .routed : .lingering
+                    : app.isPlaying || app.isPinned ? .routed : .lingering
             } else {
                 return nil
             }
@@ -371,11 +373,13 @@ public final class SoundUController {
                             state: state)
         }
 
+        // Playing apps, then System Sounds (whatever its state), then lingering, then the rest.
         func rank(_ s: AppStrip) -> Int {
+            if s.id == SystemSounds.appID { return 1 }
             switch s.state {
-            case .routed: 0
-            case .lingering: 1
-            default: 2
+            case .routed: return 0
+            case .lingering: return 2
+            default: return 3
             }
         }
         let sorted = strips.sorted { (rank($0), $0.name, $0.id) < (rank($1), $1.name, $1.id) }

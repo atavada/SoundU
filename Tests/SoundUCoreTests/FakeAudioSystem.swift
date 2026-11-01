@@ -24,6 +24,8 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
     private var _calls: [Call] = []
     private var _failingTapNames: Set<String> = []
     private var _failingAggregateDeviceUIDs: Set<String> = []
+    private var _failSetAggregateTaps = false
+    private var _onSetAggregateTaps: ((AudioObjectID) -> Void)?
     private var _deviceInputStreams: [String: Int] = [:]
     private var aggregateLayout: [AudioObjectID: (deviceUID: String, taps: Int)] = [:]
     private var _runningBundleIDs: Set<String> = []
@@ -60,6 +62,15 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
     var failingAggregateDeviceUIDs: Set<String> {
         get { locked { _failingAggregateDeviceUIDs } }
         set { locked { _failingAggregateDeviceUIDs = newValue } }
+    }
+    var failSetAggregateTaps: Bool {
+        get { locked { _failSetAggregateTaps } }
+        set { locked { _failSetAggregateTaps = newValue } }
+    }
+    /// Runs inside `setAggregateTaps`, after the new tap list took effect (not on failure).
+    var onSetAggregateTaps: ((AudioObjectID) -> Void)? {
+        get { locked { _onSetAggregateTaps } }
+        set { locked { _onSetAggregateTaps = newValue } }
     }
     /// Device UID → the device's own input stream count (default 0).
     var deviceInputStreams: [String: Int] {
@@ -142,10 +153,15 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
     }
 
     func setAggregateTaps(_ agg: AudioObjectID, tapUIDs: [String]) throws {
-        locked {
+        let hook = try locked { () throws -> ((AudioObjectID) -> Void)? in
             _calls.append(.setAggregateTaps(agg, tapUIDs: tapUIDs))
+            if _failSetAggregateTaps {
+                throw AudioSystemError("set tap list on aggregate \(agg)", kAudioHardwareUnspecifiedError)
+            }
             aggregateLayout[agg]?.taps = tapUIDs.count
+            return _onSetAggregateTaps
         }
+        hook?(agg)
     }
 
     func destroyAggregate(_ agg: AudioObjectID) {

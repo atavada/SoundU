@@ -58,6 +58,8 @@ void su_mix_init(SUMixState *m, double sampleRate);
 
 /// Binds `slot` to input buffer `inputBufferIndex`, resets its ramp to `gain`
 /// and its limiter, then sets `active = 1`. Non-RT.
+/// Contract: only on a slot the render thread is not reading — never activated, or
+/// deactivated with at least one full IO cycle completed since (it writes plain fields).
 void su_slot_configure(SUMixState *m, uint32_t slot, uint32_t inputBufferIndex, float gain, int muted);
 
 /// Updates target gain (clamped to 0...2) and mute. Mute ramps to 0 like a gain change

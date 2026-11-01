@@ -53,9 +53,9 @@ public final class AudioEngine {
         let devices = Dictionary(system.outputDevices().map { ($0.uid, $0) }, uniquingKeysWith: { a, _ in a })
         for (uid, specs) in plan.byDevice.sorted(by: { $0.key < $1.key }) where !specs.isEmpty {
             if let graph = graphs[uid] {
-                let (failures, empty) = graph.update(specs, gains: gain)
+                let (failures, stopGraph) = graph.update(specs, gains: gain)
                 report(failures)
-                if empty { stop(graph) }
+                if stopGraph { stop(graph) }
             } else if !permissionPending {
                 start(uid, device: devices[uid], specs: specs)
             }

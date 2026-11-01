@@ -137,6 +137,47 @@ final class AudioEngineTests: XCTestCase {
         XCTAssertEqual(render(fake, agg, inputs: [0.1, 0.3], cycles: 20), 0.25, accuracy: 1e-5)
     }
 
+    /// While the HAL switches to a shifted tap list, no slot may read another app's buffer:
+    /// slots whose buffer index changes are off before the change (a short gap instead).
+    func testShiftedTapListNeverRendersAnotherAppsBuffer() throws {
+        let (engine, fake, _) = makeEngine()
+        engine.set(appID: "A", volume: 0, muted: false)
+        engine.set(appID: "Chrome", volume: 1, muted: false)
+        engine.set(appID: "C", volume: 0.5, muted: false)
+        engine.apply(plan(["speakers": [spec("A", 1), spec("Chrome", 2), spec("C", 3)]]))
+        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
+        XCTAssertEqual(render(fake, agg, inputs: [0, 0.2, 0.3], cycles: 20), 0.35, accuracy: 1e-5)
+
+        // Chrome leaves: the HAL now delivers C's audio in buffer 1, Chrome's old buffer.
+        var during: Float?
+        fake.onSetAggregateTaps = { agg in
+            MainActor.assumeIsolated { during = self.render(fake, agg, inputs: [0, 0.3]) }
+        }
+        engine.apply(plan(["speakers": [spec("A", 1), spec("C", 3)]]))
+
+        XCTAssertEqual(during ?? -1, 0, accuracy: 1e-6, "C's audio must not play at Chrome's gain")
+        XCTAssertEqual(render(fake, agg, inputs: [0, 0.3], cycles: 20), 0.15, accuracy: 1e-5)
+    }
+
+    /// A failed tap-list change must not leave the old list (e.g. a call app) tapped.
+    func testFailedTapListChangeTearsDownGraph() throws {
+        let (engine, fake, _) = makeEngine()
+        engine.apply(plan(["speakers": [spec("A", 1), spec("Call", 2)]]))
+        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
+        let mark = fake.calls.count
+        fake.failSetAggregateTaps = true
+
+        engine.apply(plan(["speakers": [spec("A", 1)]]))
+
+        let calls = Array(fake.calls[mark...])
+        XCTAssertNil(engine.runningAggregates["speakers"], "graph stopped: its apps play directly")
+        XCTAssertTrue(calls.contains(.stopIO(aggregate: agg)))
+        XCTAssertTrue(calls.contains(.destroyAggregate(agg)))
+        XCTAssertEqual(calls.filter { if case .destroyTap = $0 { true } else { false } }.count, 2,
+                       "both old taps destroyed, the call app's included")
+        XCTAssertEqual(fake.activeIOCount, 0)
+    }
+
     /// The physical device's own input streams come first in the aggregate's input buffers.
     func testDeviceInputStreamsOffsetTapBuffers() throws {
         let (engine, fake, _) = makeEngine()

@@ -123,9 +123,12 @@ final class DeviceGraph {
     /// Brings the tap list in line with `specs` without recreating the aggregate: unchanged
     /// taps stay, an app whose process set changed gets a new tap in the same position,
     /// removed apps' taps go, new apps are appended. Apps whose input buffer index changes
-    /// move to a fresh mixer slot. Returns apps that could not be tapped (left untapped), and
-    /// `empty` when no tap is left; the caller then tears the graph down (old taps included).
-    func update(_ specs: [TapSpec], gains: Gains) -> (failures: [Failure], empty: Bool) {
+    /// move to a fresh mixer slot; their old slots are switched off before the HAL changes the
+    /// tap list, so no slot ever reads another app's buffer (moved apps get a few-ms gap).
+    /// Returns apps that could not be tapped (left untapped), and `stop` when the caller must
+    /// tear the graph down: no tap is left, or the tap-list change failed (the old list, which
+    /// may include an app that must no longer be tapped, would otherwise stay live).
+    func update(_ specs: [TapSpec], gains: Gains) -> (failures: [Failure], stop: Bool) {
         let wanted = Dictionary(specs.map { ($0.appID, $0.processObjectIDs) }, uniquingKeysWith: { a, _ in a })
         let existing = Set(taps.map(\.appID))
         let added = specs.filter { !existing.contains($0.appID) }
@@ -180,12 +183,17 @@ final class DeviceGraph {
             created.forEach { system.destroyTap($0.tapID) }
             return (failures, true)
         }
+
+        // Before the HAL change: switch off removed slots and slots whose buffer index changes.
+        let keptSlots = Set(final.filter { !fresh.contains($0.appID) }.map(\.slot))
+        retire(taps.map(\.slot).filter { !keptSlots.contains($0) })
+
         if final.map(\.uid) != taps.map(\.uid) {
             do {
                 try system.setAggregateTaps(aggregate, tapUIDs: final.map(\.uid))
             } catch {
                 created.forEach { system.destroyTap($0.tapID) }
-                return (failures + created.map { ($0.appID, "\(error)") }, false)
+                return (failures + created.map { ($0.appID, "\(error)") }, true)
             }
         }
 
@@ -193,24 +201,20 @@ final class DeviceGraph {
         // remaining kept taps fresh slots too (a live slot's buffer index cannot be changed).
         let newBase = currentBase(tapCount: final.count)
         if newBase != base {
+            var moved: [UInt32] = []
             for i in final.indices where !fresh.contains(final[i].appID) {
                 guard !free.isEmpty else {
                     Self.log.error("no free mixer slot to move \(final[i].appID, privacy: .public) to its new buffer")
                     continue
                 }
+                moved.append(final[i].slot)
                 final[i].slot = free.removeFirst()
                 fresh.insert(final[i].appID)
             }
+            retire(moved)
             base = newBase
         }
 
-        // Retire slots no longer used at the same index, then configure fresh ones.
-        let keptSlots = Set(final.filter { !fresh.contains($0.appID) }.map(\.slot))
-        let count = callbackCount
-        for tap in taps where !keptSlots.contains(tap.slot) {
-            su_slot_deactivate(state, tap.slot)
-            retired.append((tap.slot, count))
-        }
         for (index, tap) in final.enumerated() where fresh.contains(tap.appID) {
             configure(tap, buffer: base + index, gains: gains)
         }
@@ -218,6 +222,15 @@ final class DeviceGraph {
         for tap in created where !finalUIDs.contains(tap.uid) { system.destroyTap(tap.tapID) }
         taps = final
         return (failures, false)
+    }
+
+    /// Deactivates `slots`; they become reusable once IO has moved on (see `freeSlots`).
+    private func retire(_ slots: [UInt32]) {
+        let count = callbackCount
+        for slot in slots {
+            su_slot_deactivate(state, slot)
+            retired.append((slot, count))
+        }
     }
 
     /// Slots neither in use nor recently deactivated. A deactivated slot is reusable once

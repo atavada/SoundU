@@ -58,8 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Menu-bar glyph; shows a small dot while Call Guard protects a call. Task 12 replaces the
-/// base SF Symbol with SoundU's template glyph.
+/// Menu-bar glyph; shows a small dot while Call Guard protects a call.
 private struct MenuBarLabel: View {
     let controller: SoundUController
 
@@ -73,8 +72,18 @@ private struct MenuBarLabel: View {
         }
     }
 
-    private static let base = NSImage(systemSymbolName: "slider.vertical.3", accessibilityDescription: "SoundU")?
-        .withSymbolConfiguration(.init(pointSize: 15, weight: .regular)) ?? NSImage()
+    /// SoundU's 18 pt template glyph from the bundle; the SF Symbol when it is missing (e.g. when
+    /// run unbundled from `swift run`).
+    private static let base: NSImage = {
+        if let url = Bundle.main.url(forResource: "MenuBarTemplate", withExtension: "pdf"),
+           let image = NSImage(contentsOf: url) {
+            image.size = NSSize(width: 18, height: 18)
+            image.isTemplate = true
+            return image
+        }
+        return NSImage(systemSymbolName: "slider.vertical.3", accessibilityDescription: "SoundU")?
+            .withSymbolConfiguration(.init(pointSize: 15, weight: .regular)) ?? NSImage()
+    }()
 
     /// The base glyph, plus a dot in its top-right corner when `dot`; a template image so the
     /// menu bar tints it.

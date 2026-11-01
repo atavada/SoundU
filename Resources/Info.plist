@@ -6,6 +6,8 @@
 	<string>com.example.SoundU</string>
 	<key>CFBundleExecutable</key>
 	<string>SoundU</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleName</key>
 	<string>SoundU</string>
 	<key>CFBundlePackageType</key>

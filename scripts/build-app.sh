@@ -16,9 +16,12 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin/SoundU" "$app/Contents/MacOS/SoundU"
 cp Resources/Info.plist "$app/Contents/Info.plist"
-# Everything else in Resources/ (icons, assets) goes into Contents/Resources.
+# App icon and menu-bar template, rendered from the SVG masters in Resources/Icon.
+swift scripts/render-icon.swift Resources/Icon build/icon
+cp build/icon/AppIcon.icns build/icon/MenuBarTemplate.pdf "$app/Contents/Resources/"
+# Everything else in Resources/ (assets) goes into Contents/Resources.
 for f in Resources/*(N); do
-    [[ "${f:t}" == Info.plist ]] || cp -R "$f" "$app/Contents/Resources/"
+    [[ "${f:t}" == (Info.plist|Icon) ]] || cp -R "$f" "$app/Contents/Resources/"
 done
 
 codesign --force -s "${SOUNDU_SIGN_IDENTITY:--}" --options runtime "$app"

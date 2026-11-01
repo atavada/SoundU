@@ -123,16 +123,24 @@ public final class SoundUController {
         ]
     }
 
-    /// Stops every graph (apps play directly again) and saves settings now.
+    /// Saves settings, then stops every graph (apps play directly again). For tests and the
+    /// headless command; the app uses `prepareForTermination()` when it quits.
     public func shutdown() {
+        prepareForTermination()
+        engine.stopAll()
+    }
+
+    /// Quit path: saves settings now and stops loops and observers, but makes no HAL calls —
+    /// stopping IO can block, and the private aggregates, `.mutedWhenTapped` taps and the
+    /// per-client 'nodk' exemption all vanish with the process anyway.
+    public func prepareForTermination() {
+        pendingSave?.cancel()
+        save()
         loops.forEach { $0.cancel() }
         loops = []
         monitor.onChange = nil
         observation = nil
         engine.onEvent = nil
-        engine.stopAll()
-        pendingSave?.cancel()
-        save()
     }
 
     /// Clears the engine's permission flag and re-plans, so graphs are tried again.

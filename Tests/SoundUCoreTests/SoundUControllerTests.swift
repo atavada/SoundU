@@ -153,4 +153,21 @@ final class SoundUControllerTests: XCTestCase {
         }
         XCTAssertTrue(metered, "levels: \(controller.levels)")
     }
+
+    func testPrepareForTerminationSavesNowWithoutTeardown() async throws {
+        let (controller, fake, store) = try makeController()
+        controller.start()
+        let routed = await waitUntil(1) { self.strip(controller, self.spotifyID)?.state == .routed }
+        XCTAssertTrue(routed)
+        controller.setVolume(spotifyID, 0.4)
+        let callsBefore = fake.calls
+
+        controller.prepareForTermination()
+
+        XCTAssertEqual(store.load().setting(for: spotifyID).volume, 0.4, "saved without waiting for the debounce")
+        XCTAssertEqual(fake.calls, callsBefore, "no HAL calls: IO, aggregates and taps vanish with the process")
+        XCTAssertEqual(fake.activeIOCount, 1, "IO left running")
+        try? await Task.sleep(for: .milliseconds(1200))
+        XCTAssertEqual(fake.calls, callsBefore, "loops stopped: no re-plan after termination prep")
+    }
 }

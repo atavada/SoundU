@@ -34,16 +34,17 @@ struct SoundUApp: App {
     }
 }
 
-/// Owns the one controller: starts it at launch, stops every graph before the app quits.
+/// Owns the one controller: starts it at launch, saves settings when the app quits.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = SoundUController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         controller.start()
-        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
-                                               object: nil, queue: .main) { [controller] _ in
-            MainActor.assumeIsolated { controller.shutdown() }
-        }
+    }
+
+    /// Saves and exits without stopping IO: the process exit removes SoundU's taps and aggregates.
+    func applicationWillTerminate(_ notification: Notification) {
+        controller.prepareForTermination()
     }
 }

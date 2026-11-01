@@ -6,11 +6,16 @@ import SwiftUI
 struct PanelView: View {
     let controller: SoundUController
     @State private var scroll = StripScroll()
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
+            if controller.permission == .pending {
+                PermissionBanner(controller: controller)
+                Divider()
+            }
             HStack(spacing: 0) {
                 MasterStrip(controller: controller, scroll: scroll)
                 Divider()
@@ -34,7 +39,11 @@ struct PanelView: View {
                 .padding(.vertical, 3)
                 .background(.quaternary, in: Capsule())
             Menu {
-                SettingsLink { Text("Settings…") }
+                Button("Settings…") {
+                    openSettings()
+                    // SoundU is LSUIElement: without activating, Settings opens behind other apps.
+                    NSApp.activate()
+                }
                 Divider()
                 Button("Quit SoundU") { NSApp.terminate(nil) }
             } label: {

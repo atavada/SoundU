@@ -28,19 +28,27 @@ struct SoundUApp: App {
         .menuBarExtraStyle(.window)
 
         Settings {
-            Text("Settings are coming soon.")
-                .padding(40)
+            SettingsView(controller: delegate.controller)
         }
     }
 }
 
-/// Owns the one controller: starts it at launch, saves settings when the app quits.
+/// Owns the one controller: starts it at launch (after the first-run sheet on first launch),
+/// saves settings when the app quits.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = SoundUController()
+    private let firstRun = FirstRunWindow()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        controller.start()
+        if controller.global.firstRunDone {
+            controller.start()
+            return
+        }
+        firstRun.show { [controller] in
+            controller.start()
+            controller.markFirstRunDone()
+        }
     }
 
     /// Saves and exits without stopping IO: the process exit removes SoundU's taps and aggregates.

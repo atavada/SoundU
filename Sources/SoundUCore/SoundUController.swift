@@ -55,8 +55,12 @@ public final class SoundUController {
     /// updates only redraw the views that read them.
     public private(set) var levels: [String: Float] = [:]
 
+    /// Global preferences the Settings window edits; mirrors `settings.global` so views observe
+    /// it without redrawing on every per-app change.
+    public private(set) var global: GlobalSettings
+
     /// Upper fader limit (100–200 %).
-    public var boostCeiling: Float { settings.global.boostCeiling }
+    public var boostCeiling: Float { global.boostCeiling }
 
     @ObservationIgnored let engine: AudioEngine
     @ObservationIgnored private let system: AudioSystem
@@ -90,6 +94,7 @@ public final class SoundUController {
         self.store = store
         self.selfBundleID = selfBundleID
         settings = store.load()
+        global = settings.global
         monitor = ProcessMonitor(system: system, runningApps: runningApps)
         engine = AudioEngine(system: system, permissionTimeout: permissionTimeout)
     }
@@ -182,6 +187,35 @@ public final class SoundUController {
     private func pushGain(_ appID: String) {
         let setting = settings.setting(for: appID)
         engine.set(appID: appID, volume: setting.volume, muted: setting.muted)
+    }
+
+    // MARK: - Global settings
+
+    /// Sets the fader ceiling (clamped to 1.0...2.0) and lowers saved volumes above it.
+    public func setBoostCeiling(_ ceiling: Float) {
+        changeGlobal { $0.boostCeiling = min(max(ceiling, 1), 2) }
+        for appID in settings.apps.keys {
+            settings.apps[appID] = settings.setting(for: appID)
+            pushGain(appID)
+        }
+        for i in apps.indices { apps[i].volume = settings.setting(for: apps[i].id).volume }
+    }
+
+    /// Persists the flag only; registering with `SMAppService` is the app's job.
+    public func setLaunchAtLogin(_ on: Bool) { changeGlobal { $0.launchAtLogin = on } }
+
+    public func setCallGuardEnabled(_ on: Bool) { changeGlobal { $0.callGuardEnabled = on } }
+
+    public func setCallApps(_ bundleIDs: [String]) { changeGlobal { $0.callApps = bundleIDs } }
+
+    public func resetCallApps() { setCallApps(GlobalSettings().callApps) }
+
+    public func markFirstRunDone() { changeGlobal { $0.firstRunDone = true } }
+
+    private func changeGlobal(_ body: (inout GlobalSettings) -> Void) {
+        body(&settings.global)
+        if settings.global != global { global = settings.global }
+        scheduleSave()
     }
 
     // MARK: - Settings persistence

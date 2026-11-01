@@ -31,7 +31,8 @@ final class SoundUControllerTests: XCTestCase {
                         parentPID: 1, responsiblePID: owner.pid, isRunningOutput: playing, isRunningInput: false)
     }
 
-    private func makeController(settings: SettingsSnapshot = SettingsSnapshot(), playing: Bool = true)
+    private func makeController(settings: SettingsSnapshot = SettingsSnapshot(), playing: Bool = true,
+                                permissionTimeout: Duration = .seconds(60))
         throws -> (SoundUController, FakeAudioSystem, SettingsStore) {
         let fake = FakeAudioSystem()
         fake.devices = [speakers, airPods]
@@ -41,7 +42,7 @@ final class SoundUControllerTests: XCTestCase {
         try store.save(settings)
         let apps = [spotify]
         let controller = SoundUController(system: fake, store: store, runningApps: { apps },
-                                          selfBundleID: "com.example.SoundU", permissionTimeout: .seconds(60))
+                                          selfBundleID: "com.example.SoundU", permissionTimeout: permissionTimeout)
         return (controller, fake, store)
     }
 
@@ -169,5 +170,82 @@ final class SoundUControllerTests: XCTestCase {
         XCTAssertEqual(fake.activeIOCount, 1, "IO left running")
         try? await Task.sleep(for: .milliseconds(1200))
         XCTAssertEqual(fake.calls, callsBefore, "loops stopped: no re-plan after termination prep")
+    }
+
+    /// Review Focus 1 at the controller: no IO callbacks → `.pending`, nothing left tapped.
+    func testPermissionPendingWhenEngineReportsIt() async throws {
+        let (controller, fake, _) = try makeController(permissionTimeout: .milliseconds(50))
+        controller.start()
+        defer { controller.shutdown() }
+
+        let pending = await waitUntil(1) { controller.permission == .pending }
+
+        XCTAssertTrue(pending, "permission: \(controller.permission)")
+        XCTAssertTrue(controller.engine.runningAggregates.isEmpty, "no apps routed")
+        XCTAssertEqual(fake.activeIOCount, 0)
+        XCTAssertEqual(strip(controller, spotifyID)?.state, .notRouted(.permissionPending))
+    }
+
+    func testCeilingChangeClampsExistingVolumes() async throws {
+        var settings = SettingsSnapshot()
+        settings.apps[spotifyID] = AppSetting(volume: 1.8, muted: false, outputDeviceUID: nil)
+        let (controller, fake, store) = try makeController(settings: settings)
+        controller.start()
+        defer { controller.shutdown() }
+        let routed = await waitUntil(1) { self.strip(controller, self.spotifyID)?.state == .routed }
+        XCTAssertTrue(routed, "strips: \(controller.apps)")
+        let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
+        XCTAssertEqual(render(fake, agg, input: 0.5, cycles: 40), 0.9, accuracy: 0.001)
+
+        controller.setBoostCeiling(1.2)
+
+        XCTAssertEqual(controller.global.boostCeiling, 1.2)
+        XCTAssertEqual(controller.boostCeiling, 1.2)
+        XCTAssertEqual(strip(controller, spotifyID)?.volume, 1.2)
+        XCTAssertEqual(render(fake, agg, input: 0.5, cycles: 40), 0.6, accuracy: 0.001)
+        let saved = await waitUntil(1.5) {
+            let s = store.load()
+            return s.global.boostCeiling == 1.2 && s.apps[self.spotifyID]?.volume == 1.2
+        }
+        XCTAssertTrue(saved)
+
+        controller.setBoostCeiling(5)
+        XCTAssertEqual(controller.global.boostCeiling, 2, "ceiling clamped to 1.0...2.0")
+        controller.setBoostCeiling(0.5)
+        XCTAssertEqual(controller.global.boostCeiling, 1)
+    }
+
+    func testCallAppListEditPersists() async throws {
+        let (controller, _, store) = try makeController()
+        let defaults = GlobalSettings().callApps
+
+        controller.setCallApps(defaults + ["us.zoom.xos"])
+        controller.setCallGuardEnabled(false)
+
+        XCTAssertEqual(controller.global.callApps, defaults + ["us.zoom.xos"])
+        XCTAssertFalse(controller.global.callGuardEnabled)
+        let saved = await waitUntil(1.5) {
+            let g = store.load().global
+            return g.callApps == defaults + ["us.zoom.xos"] && !g.callGuardEnabled
+        }
+        XCTAssertTrue(saved)
+
+        controller.resetCallApps()
+        controller.prepareForTermination()
+
+        XCTAssertEqual(controller.global.callApps, defaults)
+        XCTAssertEqual(store.load().global.callApps, defaults)
+    }
+
+    func testFirstRunAndLaunchAtLoginFlagsPersist() throws {
+        let (controller, _, store) = try makeController()
+        XCTAssertFalse(controller.global.firstRunDone)
+
+        controller.markFirstRunDone()
+        controller.setLaunchAtLogin(true)
+        controller.prepareForTermination()
+
+        XCTAssertTrue(store.load().global.firstRunDone)
+        XCTAssertTrue(store.load().global.launchAtLogin)
     }
 }

@@ -3,9 +3,11 @@ import CoreAudio
 import Foundation
 
 /// Keeps a current `Grouping`: re-reads the HAL process list (and running apps) after every
-/// `.processes` change, coalescing bursts with a 100 ms trailing debounce.
+/// `.processes` change, coalescing bursts with a 100 ms trailing debounce that never delays a
+/// refresh more than 400 ms past the first pending event.
 public final class ProcessMonitor: @unchecked Sendable {
     static let debounce: DispatchTimeInterval = .milliseconds(100)
+    static let maxWait: DispatchTimeInterval = .milliseconds(400)
 
     private let system: AudioSystem
     private let runningApps: @Sendable () -> [RunningApp]
@@ -15,6 +17,8 @@ public final class ProcessMonitor: @unchecked Sendable {
     private var _onChange: (@Sendable (Grouping) -> Void)?
     /// Touched only on `queue`.
     private var pending: DispatchWorkItem?
+    /// When the first event of the current burst arrived; touched only on `queue`.
+    private var burstStart: DispatchTime?
     private var token: AnyObject?
 
     /// Called on a background queue with the initial grouping on `start()`, then whenever it changes.
@@ -48,9 +52,15 @@ public final class ProcessMonitor: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             pending?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.refresh(force: false) }
+            let now = DispatchTime.now()
+            let start = burstStart ?? now
+            burstStart = start
+            let work = DispatchWorkItem { [weak self] in
+                self?.burstStart = nil
+                self?.refresh(force: false)
+            }
             pending = work
-            queue.asyncAfter(deadline: .now() + Self.debounce, execute: work)
+            queue.asyncAfter(deadline: min(now + Self.debounce, start + Self.maxWait), execute: work)
         }
     }
 

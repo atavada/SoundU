@@ -195,6 +195,30 @@ final class ProcessGroupingTests: XCTestCase {
         XCTAssertEqual(monitor.current().apps.first?.isPlaying, true)
     }
 
+    /// A steady stream of events (closer than the 100 ms debounce) still refreshes within 400 ms
+    /// of the first one.
+    func testMonitorDebounceHasMaxWait() {
+        let system = FakeAudioSystem()
+        system.processList = [spotifyProc(output: false)]
+        let monitor = ProcessMonitor(system: system, runningApps: { [spotify] in [spotify] })
+        let changedAt = Locked<Date?>(nil)
+        monitor.onChange = { grouping in
+            if grouping.apps.first?.isPlaying == true { changedAt.withValue { $0 = $0 ?? Date() } }
+        }
+        monitor.start()
+
+        system.processList = [spotifyProc(output: true)]
+        let start = Date()
+        while Date().timeIntervalSince(start) < 1.2 { // events every 50 ms for 1.2 s
+            system.send(.processes)
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        let at = changedAt.withValue { $0 }
+        XCTAssertNotNil(at, "no refresh during the burst")
+        if let at { XCTAssertLessThan(at.timeIntervalSince(start), 0.55, "refresh within the 400 ms max wait") }
+    }
+
     func testMonitorIgnoresDeviceChanges() {
         let system = FakeAudioSystem()
         system.processList = [spotifyProc(output: false)]

@@ -60,7 +60,8 @@ void su_mix_init(SUMixState *m, double sampleRate);
 /// and its limiter, then sets `active = 1`. Non-RT.
 void su_slot_configure(SUMixState *m, uint32_t slot, uint32_t inputBufferIndex, float gain, int muted);
 
-/// Updates target gain (clamped to 0...2) and mute. Any thread; atomics only.
+/// Updates target gain (clamped to 0...2) and mute. Mute ramps to 0 like a gain change
+/// (10 ms slope), then the slot is skipped. Any thread; atomics only.
 void su_slot_set(SUMixState *m, uint32_t slot, float gain, int muted);
 
 void su_slot_deactivate(SUMixState *m, uint32_t slot);

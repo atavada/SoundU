@@ -218,7 +218,7 @@ final class AudioEngineTests: XCTestCase {
         engine.set(appID: "A", volume: 0.5, muted: false)
         XCTAssertEqual(render(fake, agg, inputs: [0.1], cycles: 20), 0.05, accuracy: 1e-6)
         engine.set(appID: "A", volume: 0.5, muted: true)
-        XCTAssertEqual(render(fake, agg, inputs: [0.1]), 0, accuracy: 1e-6)
+        XCTAssertEqual(render(fake, agg, inputs: [0.1], cycles: 20), 0, accuracy: 1e-6) // past the mute ramp
         engine.set(appID: "Unknown", volume: 2, muted: false)
 
         XCTAssertEqual(fake.calls, calls)

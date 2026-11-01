@@ -32,6 +32,33 @@ final class RenderTests: XCTestCase {
         XCTAssertEqual(su_slot_take_peak(mix.state, 0), 0)
     }
 
+    /// Mute ramps to 0 over the 10 ms slope (no click) and then outputs exact silence.
+    func testMuteRampsDownWithoutStepsAndReachesZero() {
+        let mix = TestMixState()
+        su_slot_configure(mix.state, 0, 0, 1.0, 0)
+        let input = TestBufferList(buffers: 1, channelsPerBuffer: 2, frames: frames)
+        input.samples(0).update(repeating: 0.5)
+        let output = TestBufferList(buffers: 1, channelsPerBuffer: 2, frames: frames)
+        mix.render(input, output, frames: frames)
+        var previous = output.samples(0)[2 * (frames - 1)]
+        XCTAssertEqual(previous, 0.5)
+
+        su_slot_set(mix.state, 0, 1.0, 1)
+        let maxStep = 0.5 / Float(0.010 * 48000) + 1e-6 // input x one ramp step
+        for block in 0..<4 { // 1024 frames > the 480-frame ramp
+            mix.render(input, output, frames: frames)
+            let out = output.samples(0)
+            for f in 0..<frames {
+                XCTAssertLessThanOrEqual(abs(out[2 * f] - previous), maxStep, "block \(block) frame \(f)")
+                previous = out[2 * f]
+            }
+        }
+        XCTAssertTrue(output.samples(0).allSatisfy { $0 == 0 }, "exact silence once the ramp ends")
+        _ = su_slot_take_peak(mix.state, 0)
+        mix.render(input, output, frames: frames)
+        XCTAssertEqual(su_slot_take_peak(mix.state, 0), 0, "a fully muted slot is skipped")
+    }
+
     func testSixChannelNonInterleavedGetsStereoOnFirstTwo() {
         let mix = TestMixState()
         su_slot_configure(mix.state, 0, 0, 1.0, 0)

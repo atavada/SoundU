@@ -84,14 +84,15 @@ static void mix_slots(SUMixState *m, const AudioBufferList *in, uint32_t offset,
         SUSlot *s = &m->slots[i];
         if (!atomic_load_explicit(&s->active, memory_order_acquire)) continue;
 
-        read_input(in, s->inputBuffer, offset, frames, m->scratch);
-        if (atomic_load_explicit(&s->muted, memory_order_relaxed)) {
-            s->ramp.current = 0.0f; // unmute fades back in
+        // Mute is a ramp to 0 (no click); once silent the slot is skipped.
+        int muted = atomic_load_explicit(&s->muted, memory_order_relaxed);
+        if (muted && s->ramp.current == 0.0f) {
             s->limiter.envelope = 0.0f;
             continue;
         }
 
-        float target = atomic_load_explicit(&s->targetGain, memory_order_relaxed);
+        read_input(in, s->inputBuffer, offset, frames, m->scratch);
+        float target = muted ? 0.0f : atomic_load_explicit(&s->targetGain, memory_order_relaxed);
         float startGain = s->ramp.current;
         if (startGain == target && target != 1.0f) {
             vDSP_vsmul(m->scratch, 1, &target, m->scratch, 1, samples);

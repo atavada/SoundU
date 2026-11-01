@@ -41,4 +41,20 @@ final class RampTests: XCTestCase {
         }
         XCTAssertTrue(identical)
     }
+
+    func testNonUnityApplyRampsBothChannelsPerFrame() {
+        var r = SURamp()
+        su_ramp_init(&r, 1.0, 48000)
+        let step = Float(1.0 / (0.010 * 48000.0))
+        let frames = 600
+        var buffer = [Float](repeating: 1.0, count: frames * 2)
+        su_ramp_apply_stereo(&r, 0.0, &buffer, UInt32(frames))
+        for i in 0..<frames {
+            XCTAssertEqual(buffer[2 * i], buffer[2 * i + 1], "L/R differ at frame \(i)")
+            let expected = max(0, 1.0 - Float(i + 1) * step)
+            XCTAssertEqual(buffer[2 * i], expected, accuracy: 1e-4, "frame \(i)")
+        }
+        XCTAssertEqual(buffer[2 * (frames - 1)], 0)
+        XCTAssertEqual(r.current, 0)
+    }
 }

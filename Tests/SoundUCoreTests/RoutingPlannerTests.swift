@@ -175,4 +175,20 @@ final class RoutingPlannerTests: XCTestCase {
                                 calls: ["com.apple.FaceTime"]))
         XCTAssertEqual(during.excluded, ["com.apple.FaceTime": .callInProgress])
     }
+
+    /// Apple's own apps live under /System/ too (/System/Applications, WebKit's XPC services):
+    /// anything inside an app, extension or XPC bundle is not a system daemon.
+    func testBundledSystemLocatedAppsStillRouted() {
+        let result = plan(input([
+            app("com.apple.Music", [daemon(2, "/System/Applications/Music.app/Contents/MacOS/Music")]),
+            app("com.apple.Safari", [daemon(5, "/System/Library/Frameworks/WebKit.framework/Versions/A/"
+                                           + "XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU")]),
+            app("com.apple.FaceTime", [daemon(7, "/System/Applications/FaceTime.app/Contents/MacOS/FaceTime")]),
+            app("com.apple.widget", [daemon(8, "/System/Applications/Weather.app/Contents/PlugIns/"
+                                           + "WeatherWidget.appex/Contents/MacOS/WeatherWidget")]),
+        ]))
+        XCTAssertEqual(result.byDevice.values.joined().map(\.appID).sorted(),
+                       ["com.apple.FaceTime", "com.apple.Music", "com.apple.Safari", "com.apple.widget"])
+        XCTAssertEqual(result.excluded, [:])
+    }
 }

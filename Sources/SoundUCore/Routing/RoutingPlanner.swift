@@ -34,8 +34,8 @@ public struct PlannerInput: Sendable {
 /// Why an app that would otherwise be routed is left untapped.
 public enum Exclusion: Equatable, Sendable {
     case callInProgress, sharedWithCall, soundU, tapFailed
-    /// Every process is a system daemon (under /usr/ or /System/), e.g. systemsoundserverd
-    /// playing notification sounds. Never routed and never shown.
+    /// Every process is a bare system daemon (under /usr/ or /System/, outside any app or XPC
+    /// bundle), e.g. systemsoundserverd playing notification sounds. Never routed or shown.
     case systemProcess
     /// Set by the controller while Audio Capture permission is pending; never emitted by `plan`.
     case permissionPending
@@ -98,8 +98,13 @@ public func plan(_ input: PlannerInput) -> RoutingPlan {
     return RoutingPlan(byDevice: byDevice.mapValues { $0.sorted { $0.appID < $1.appID } }, excluded: excluded)
 }
 
-/// A process whose executable is part of the OS. Call services (avconferenced, callservicesd)
-/// are not: they carry FaceTime and Phone audio.
+/// A bare OS daemon: an executable under /usr/ or /System/ that is not inside an app,
+/// extension or XPC bundle (Apple's apps live in /System/Applications and WebKit plays
+/// Safari's audio from an XPC service under /System/). Call services (avconferenced,
+/// callservicesd) are not daemons here: they carry FaceTime and Phone audio.
 func isSystemDaemon(_ p: ProcessSnapshot) -> Bool {
-    (p.executablePath.hasPrefix("/usr/") || p.executablePath.hasPrefix("/System/")) && !CallServices.isCallProcess(p)
+    let path = p.executablePath
+    guard path.hasPrefix("/usr/") || path.hasPrefix("/System/") else { return false }
+    let bundled = [".app/", ".appex/", ".xpc/"].contains { path.contains($0) }
+    return !bundled && !CallServices.isCallProcess(p)
 }

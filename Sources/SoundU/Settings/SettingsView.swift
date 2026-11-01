@@ -54,7 +54,7 @@ private struct GeneralTab: View {
                         .frame(width: 48, alignment: .trailing)
                 }
             }
-            Text("The highest level an app's fader can reach. Lowering it also lowers louder apps.")
+            Text("The highest level an app's fader can reach. Louder apps play at the ceiling and get their level back when you raise it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

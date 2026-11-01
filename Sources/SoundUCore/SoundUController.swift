@@ -185,11 +185,14 @@ public final class SoundUController {
         replan()
     }
 
+    /// Edits the stored setting (not the ceiling-clamped one, so a mute or output change never
+    /// writes a clamped volume back).
     private func change(_ appID: String, _ body: (inout AppSetting) -> Void) {
-        var setting = settings.setting(for: appID)
-        body(&setting)
-        settings.apps[appID] = setting
+        var stored = settings.apps[appID] ?? .default
+        body(&stored)
+        settings.apps[appID] = stored
         pushGain(appID)
+        let setting = settings.setting(for: appID)
         if let i = apps.firstIndex(where: { $0.id == appID }) {
             apps[i].volume = setting.volume
             apps[i].muted = setting.muted
@@ -205,13 +208,11 @@ public final class SoundUController {
 
     // MARK: - Global settings
 
-    /// Sets the fader ceiling (clamped to 1.0...2.0) and lowers saved volumes above it.
+    /// Sets the fader ceiling (clamped to 1.0...2.0). Louder apps play at the ceiling; their
+    /// saved volumes are kept, so raising the ceiling again restores them.
     public func setBoostCeiling(_ ceiling: Float) {
-        changeGlobal { $0.boostCeiling = min(max(ceiling, 1), 2) }
-        for appID in settings.apps.keys {
-            settings.apps[appID] = settings.setting(for: appID)
-            pushGain(appID)
-        }
+        changeGlobal { $0.boostCeiling = GlobalSettings.clampCeiling(ceiling) }
+        for appID in settings.apps.keys { pushGain(appID) }
         for i in apps.indices { apps[i].volume = settings.setting(for: apps[i].id).volume }
     }
 

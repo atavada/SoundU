@@ -17,12 +17,14 @@ public final class SettingsStore: Sendable {
         return SettingsStore(url: support.appendingPathComponent("SoundU/settings.json"))
     }
 
-    /// Saved settings; defaults when the file is missing. An unreadable file is
+    /// Saved settings (boost ceiling clamped to 1...2); defaults when the file is missing. An unreadable file is
     /// renamed to `settings.corrupt-<date>.json` and defaults are returned.
     public func load() -> SettingsSnapshot {
         guard let data = try? Data(contentsOf: url) else { return SettingsSnapshot() }
         do {
-            return try JSONDecoder().decode(SettingsSnapshot.self, from: data)
+            var snapshot = try JSONDecoder().decode(SettingsSnapshot.self, from: data)
+            snapshot.global.boostCeiling = GlobalSettings.clampCeiling(snapshot.global.boostCeiling)
+            return snapshot
         } catch {
             Self.logger.error("Settings file unreadable, using defaults: \(error.localizedDescription, privacy: .public)")
             quarantineCorruptFile()

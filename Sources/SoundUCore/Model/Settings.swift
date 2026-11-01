@@ -25,12 +25,17 @@ public struct GlobalSettings: Codable, Equatable, Sendable {
         "com.apple.avconferenced",
         "com.apple.mobilephone",
     ]
-    /// Maximum per-app gain, 1.0–2.0.
+    /// Maximum per-app gain, 1.0–2.0 (see `clampCeiling`).
     public var boostCeiling: Float = 2.0
     public var launchAtLogin = false
     public var firstRunDone = false
 
     public init() {}
+
+    /// `ceiling` limited to 1.0...2.0; NaN becomes the default 2.0.
+    public static func clampCeiling(_ ceiling: Float) -> Float {
+        ceiling.isNaN ? 2 : min(max(ceiling, 1), 2)
+    }
 }
 
 public struct SettingsSnapshot: Codable, Equatable, Sendable {
@@ -42,10 +47,11 @@ public struct SettingsSnapshot: Codable, Equatable, Sendable {
         self.global = global
     }
 
-    /// The saved setting for `bundleID` (or `.default`), with volume clamped to `0...boostCeiling`.
+    /// The saved setting for `bundleID` (or `.default`), with volume clamped to `0...boostCeiling`
+    /// (the ceiling itself clamped to 1...2). The stored volume is left as saved.
     public func setting(for bundleID: String) -> AppSetting {
         var setting = apps[bundleID] ?? .default
-        setting.volume = min(max(setting.volume, 0), global.boostCeiling)
+        setting.volume = min(max(setting.volume, 0), GlobalSettings.clampCeiling(global.boostCeiling))
         return setting
     }
 }

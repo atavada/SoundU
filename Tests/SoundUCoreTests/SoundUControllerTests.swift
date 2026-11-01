@@ -224,6 +224,7 @@ final class SoundUControllerTests: XCTestCase {
         XCTAssertEqual(fake.activeIOCount, 0)
     }
 
+    /// The ceiling caps what the engine plays; it never rewrites saved volumes.
     func testCeilingChangeClampsExistingVolumes() async throws {
         var settings = SettingsSnapshot()
         settings.apps[spotifyID] = AppSetting(volume: 1.8, muted: false, outputDeviceUID: nil)
@@ -241,16 +242,23 @@ final class SoundUControllerTests: XCTestCase {
         XCTAssertEqual(controller.boostCeiling, 1.2)
         XCTAssertEqual(strip(controller, spotifyID)?.volume, 1.2)
         XCTAssertEqual(render(fake, agg, input: 0.5, cycles: 40), 0.6, accuracy: 0.001)
-        let saved = await waitUntil(1.5) {
-            let s = store.load()
-            return s.global.boostCeiling == 1.2 && s.apps[self.spotifyID]?.volume == 1.2
-        }
-        XCTAssertTrue(saved)
+        // Mute round trip and an output change must not write the clamped level back either.
+        controller.toggleMute(spotifyID)
+        controller.toggleMute(spotifyID)
+        controller.prepareForTermination()
+        XCTAssertEqual(store.load().global.boostCeiling, 1.2)
+        XCTAssertEqual(store.load().apps[spotifyID]?.volume, 1.8, "saved volume kept")
+
+        controller.setBoostCeiling(2.0)
+        XCTAssertEqual(strip(controller, spotifyID)?.volume, 1.8)
+        XCTAssertEqual(render(fake, agg, input: 0.5, cycles: 40), 0.9, accuracy: 0.001)
 
         controller.setBoostCeiling(5)
         XCTAssertEqual(controller.global.boostCeiling, 2, "ceiling clamped to 1.0...2.0")
         controller.setBoostCeiling(0.5)
         XCTAssertEqual(controller.global.boostCeiling, 1)
+        controller.setBoostCeiling(.nan)
+        XCTAssertEqual(controller.global.boostCeiling, 2)
     }
 
     func testCallAppListEditPersists() async throws {

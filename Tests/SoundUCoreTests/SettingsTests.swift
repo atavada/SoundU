@@ -39,6 +39,23 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(snapshot.setting(for: "com.apple.Music").volume, 1.5)
     }
 
+    /// A bad ceiling (hand-edited file, NaN) is treated as 1...2, NaN as 2.
+    func testOutOfRangeCeilingIsClamped() throws {
+        var snapshot = SettingsSnapshot()
+        snapshot.apps["com.apple.Music"] = AppSetting(volume: 1.8, muted: false, outputDeviceUID: nil)
+        snapshot.global.boostCeiling = -1
+        XCTAssertEqual(snapshot.setting(for: "com.apple.Music").volume, 1.0)
+        snapshot.global.boostCeiling = .nan
+        XCTAssertEqual(snapshot.setting(for: "com.apple.Music").volume, 1.8)
+        snapshot.apps["com.apple.Music"]?.volume = 2.5
+        XCTAssertEqual(snapshot.setting(for: "com.apple.Music").volume, 2.0)
+
+        snapshot.global.boostCeiling = -1
+        let store = SettingsStore(url: url)
+        try store.save(snapshot)
+        XCTAssertEqual(store.load().global.boostCeiling, 1.0, "clamped on load")
+    }
+
     func testCorruptFileFallsBackToDefaults() throws {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try Data([0xDE, 0xAD, 0xBE, 0xEF, 0x7B]).write(to: url)

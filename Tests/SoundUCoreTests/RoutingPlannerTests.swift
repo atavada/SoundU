@@ -137,4 +137,42 @@ final class RoutingPlannerTests: XCTestCase {
         XCTAssertEqual(result.byDevice, ["speakers": [TapSpec(appID: "com.apple.Music", processObjectIDs: [2])]])
         XCTAssertEqual(result.excluded, ["com.spotify.client": .tapFailed])
     }
+
+    // MARK: - System processes
+
+    private func daemon(_ objectID: AudioObjectID, _ path: String, output: Bool = true) -> ProcessSnapshot {
+        ProcessSnapshot(objectID: objectID, pid: pid_t(objectID) + 1000, bundleID: nil, executablePath: path,
+                        parentPID: 1, responsiblePID: pid_t(objectID) + 1000,
+                        isRunningOutput: output, isRunningInput: false)
+    }
+
+    /// Notification sounds (systemsoundserverd) are never routed: re-tapping a shared aggregate
+    /// for a one-second sound glitched every other app.
+    func testSystemDaemonOnlyAppExcluded() {
+        let result = plan(input([
+            app("systemsoundserverd", [daemon(3, "/usr/sbin/systemsoundserverd")]),
+            app("com.apple.coreaudio.thing", [daemon(4, "/System/Library/Frameworks/X.framework/thing")]),
+            app("com.apple.Music", [proc(2)]),
+        ]))
+        XCTAssertEqual(result.byDevice, ["speakers": [TapSpec(appID: "com.apple.Music", processObjectIDs: [2])]])
+        XCTAssertEqual(result.excluded, ["systemsoundserverd": .systemProcess,
+                                         "com.apple.coreaudio.thing": .systemProcess])
+    }
+
+    /// An app with at least one non-system process is routed whole; call services never count as
+    /// system processes (an avconferenced-only FaceTime group is still FaceTime).
+    func testMixedAndCallServiceGroupsStillRouted() {
+        let faceTime = [proc(4), daemon(6, "/usr/libexec/avconferenced")]
+        let routed = plan(input([app("com.apple.FaceTime", faceTime)]))
+        XCTAssertEqual(routed.byDevice, ["speakers": [TapSpec(appID: "com.apple.FaceTime", processObjectIDs: [4, 6])]])
+        XCTAssertEqual(routed.excluded, [:])
+
+        let avconferencedOnly = plan(input([app("com.apple.FaceTime", [daemon(6, "/usr/libexec/avconferenced")])]))
+        XCTAssertEqual(avconferencedOnly.byDevice.values.joined().map(\.appID), ["com.apple.FaceTime"])
+
+        // Call rules keep precedence.
+        let during = plan(input([app("com.apple.FaceTime", [daemon(6, "/usr/libexec/avconferenced")])],
+                                calls: ["com.apple.FaceTime"]))
+        XCTAssertEqual(during.excluded, ["com.apple.FaceTime": .callInProgress])
+    }
 }

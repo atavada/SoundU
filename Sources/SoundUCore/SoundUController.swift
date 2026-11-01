@@ -17,6 +17,11 @@ public enum StripState: Equatable, Sendable {
     case notRouted(Exclusion)
     /// Tapping failed; the app plays directly.
     case error(String)
+
+    /// SoundU's own audio and system daemons (notification sounds) are never shown as strips.
+    public var isVisible: Bool {
+        self != .notRouted(.soundU) && self != .notRouted(.systemProcess)
+    }
 }
 
 /// One channel strip as the panel shows it.
@@ -387,7 +392,7 @@ public final class SoundUController {
             return .locked(callApp: callApp ?? app.id)
         case .tapFailed:
             return .error(tapErrors[app.id] ?? "Could not tap this app")
-        case .soundU, .permissionPending:
+        case .soundU, .systemProcess, .permissionPending:
             return .notRouted(exclusion)
         }
     }

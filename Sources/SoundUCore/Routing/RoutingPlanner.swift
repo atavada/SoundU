@@ -34,6 +34,9 @@ public struct PlannerInput: Sendable {
 /// Why an app that would otherwise be routed is left untapped.
 public enum Exclusion: Equatable, Sendable {
     case callInProgress, sharedWithCall, soundU, tapFailed
+    /// Every process is a system daemon (under /usr/ or /System/), e.g. systemsoundserverd
+    /// playing notification sounds. Never routed and never shown.
+    case systemProcess
     /// Set by the controller while Audio Capture permission is pending; never emitted by `plan`.
     case permissionPending
 }
@@ -66,7 +69,7 @@ let lingerInterval: TimeInterval = 5
 /// Decides which apps are tapped onto which device. An app is a candidate while it is playing
 /// or played less than 5 s ago; other apps are absent from the plan (neither routed nor excluded).
 /// Candidates are excluded, in precedence order, when they are SoundU itself, in an active call,
-/// failed to tap, or left with no processes after dropping those shared with an active call app.
+/// made only of system daemons (call services excepted), failed to tap, or left with no processes after dropping those shared with an active call app.
 /// Routed apps go to their saved output device when present, else to the default device.
 public func plan(_ input: PlannerInput) -> RoutingPlan {
     let deviceUIDs = Set(input.devices.map(\.uid))
@@ -82,6 +85,7 @@ public func plan(_ input: PlannerInput) -> RoutingPlan {
 
         if app.id == input.selfBundleID { excluded[app.id] = .soundU; continue }
         if input.activeCallApps.contains(app.id) { excluded[app.id] = .callInProgress; continue }
+        if app.processes.allSatisfy(isSystemDaemon) { excluded[app.id] = .systemProcess; continue }
         if input.failedApps.contains(app.id) { excluded[app.id] = .tapFailed; continue }
 
         let objectIDs = app.processes.map(\.objectID).filter { !callShared.contains($0) }.sorted()
@@ -92,4 +96,10 @@ public func plan(_ input: PlannerInput) -> RoutingPlan {
         byDevice[device, default: []].append(TapSpec(appID: app.id, processObjectIDs: objectIDs))
     }
     return RoutingPlan(byDevice: byDevice.mapValues { $0.sorted { $0.appID < $1.appID } }, excluded: excluded)
+}
+
+/// A process whose executable is part of the OS. Call services (avconferenced, callservicesd)
+/// are not: they carry FaceTime and Phone audio.
+func isSystemDaemon(_ p: ProcessSnapshot) -> Bool {
+    (p.executablePath.hasPrefix("/usr/") || p.executablePath.hasPrefix("/System/")) && !CallServices.isCallProcess(p)
 }

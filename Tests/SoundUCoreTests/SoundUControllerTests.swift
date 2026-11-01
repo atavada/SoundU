@@ -124,6 +124,23 @@ final class SoundUControllerTests: XCTestCase {
         XCTAssertEqual(strip(controller, spotifyID)?.outputDeviceUID, "airpods", "saved preference is kept")
     }
 
+    /// A notification sound (systemsoundserverd) is neither tapped nor shown.
+    func testSystemSoundServerHasNoVisibleStripAndIsNotTapped() async throws {
+        let (controller, fake, _) = try makeController()
+        let notifier = ProcessSnapshot(objectID: 9, pid: 950, bundleID: nil,
+                                       executablePath: "/usr/sbin/systemsoundserverd", parentPID: 1,
+                                       responsiblePID: 950, isRunningOutput: true, isRunningInput: false)
+        fake.processList = [process(1, owner: spotify, playing: true), notifier]
+        controller.start()
+        defer { controller.shutdown() }
+
+        let routed = await waitUntil(1) { self.strip(controller, self.spotifyID)?.state == .routed }
+        XCTAssertTrue(routed, "strips: \(controller.apps)")
+        XCTAssertEqual(strip(controller, "systemsoundserverd")?.state, .notRouted(.systemProcess))
+        XCTAssertEqual(controller.apps.filter(\.state.isVisible).map(\.id), [spotifyID])
+        XCTAssertFalse(tapped(fake, "systemsoundserverd"))
+    }
+
     func testRecentlySilentAppShownLingering() async throws {
         let (controller, fake, _) = try makeController()
         controller.start()

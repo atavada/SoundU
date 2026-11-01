@@ -58,9 +58,9 @@ struct PanelView: View {
         .padding(.vertical, 8)
     }
 
-    /// SoundU's own audio (its aggregates) is never a strip.
+    /// SoundU's own audio (its aggregates) and system daemons are never strips.
     private var visibleApps: [AppStrip] {
-        controller.apps.filter { $0.state != .notRouted(.soundU) }
+        controller.apps.filter(\.state.isVisible)
     }
 
     @ViewBuilder

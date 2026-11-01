@@ -7,16 +7,20 @@ import SwiftUI
 
 @main
 enum Entry {
-    static func main() async {
+    // Synchronous on purpose: an async `main` runs the whole app inside one main-actor job, so
+    // every other @MainActor task (settings saves, the re-plan loop, engine events) never runs.
+    static func main() {
         #if DEBUG
         if CommandLine.arguments.contains("--selftest") {
-            exit(await SelfTest.run())
+            Task { @MainActor in exit(await SelfTest.run()) }
+            dispatchMain()
         }
         if CommandLine.arguments.contains("--headless") {
-            exit(await Headless.run(arguments: CommandLine.arguments))
+            Task { @MainActor in exit(await Headless.run(arguments: CommandLine.arguments)) }
+            dispatchMain()
         }
         #endif
-        await MainActor.run { SoundUApp.main() }
+        MainActor.assumeIsolated { SoundUApp.main() }
     }
 }
 

@@ -28,19 +28,16 @@ public struct AppStrip: Identifiable, Equatable {
     public var muted: Bool
     /// Saved preference (nil = default device), even when that device is absent.
     public var outputDeviceUID: String?
-    /// Latest meter peak, 0...1.
-    public var level: Float
     public var state: StripState
 
     public init(id: String, name: String, icon: NSImage?, volume: Float, muted: Bool,
-                outputDeviceUID: String?, level: Float, state: StripState) {
+                outputDeviceUID: String?, state: StripState) {
         self.id = id
         self.name = name
         self.icon = icon
         self.volume = volume
         self.muted = muted
         self.outputDeviceUID = outputDeviceUID
-        self.level = level
         self.state = state
     }
 }
@@ -54,6 +51,12 @@ public final class SoundUController {
     public private(set) var devices: [OutputDevice] = []
     public private(set) var defaultDeviceUID: String?
     public private(set) var permission: PermissionState = .unknown
+    /// Latest meter peak per app ID, 0...1, updated at 30 Hz. Kept apart from `apps` so meter
+    /// updates only redraw the views that read them.
+    public private(set) var levels: [String: Float] = [:]
+
+    /// Upper fader limit (100–200 %).
+    public var boostCeiling: Float { settings.global.boostCeiling }
 
     @ObservationIgnored let engine: AudioEngine
     @ObservationIgnored private let system: AudioSystem
@@ -246,7 +249,6 @@ public final class SoundUController {
 
     private func rebuildStrips(_ routing: RoutingPlan, activeCallApps: Set<String>) {
         let routed = Set(routing.byDevice.values.joined().map(\.appID))
-        let levels = Dictionary(apps.map { ($0.id, $0.level) }, uniquingKeysWith: { a, _ in a })
 
         let strips = grouping.apps.compactMap { app -> AppStrip? in
             let state: StripState
@@ -261,7 +263,6 @@ public final class SoundUController {
             let setting = settings.setting(for: app.id)
             return AppStrip(id: app.id, name: app.name, icon: icon(app), volume: setting.volume,
                             muted: setting.muted, outputDeviceUID: setting.outputDeviceUID,
-                            level: state == .routed || state == .lingering ? levels[app.id] ?? 0 : 0,
                             state: state)
         }
 
@@ -305,11 +306,10 @@ public final class SoundUController {
     // MARK: - Meters
 
     private func updateLevels() {
+        let metered = apps.filter { $0.state == .routed || $0.state == .lingering }.map(\.id)
         let peaks = engine.takePeaks()
-        for i in apps.indices {
-            let level = peaks[apps[i].id] ?? 0
-            if apps[i].level != level { apps[i].level = level }
-        }
+        let next = Dictionary(uniqueKeysWithValues: metered.map { ($0, peaks[$0] ?? 0) })
+        if next != levels { levels = next }
     }
 
     private func repeating(every interval: Duration,

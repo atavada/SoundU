@@ -51,7 +51,7 @@ enum Headless {
         var second = 0
         while true {
             try? await Task.sleep(for: .seconds(1.0 / 30))
-            for strip in controller.apps { maxLevels[strip.id] = max(maxLevels[strip.id] ?? 0, strip.level) }
+            for strip in controller.apps { maxLevels[strip.id] = max(maxLevels[strip.id] ?? 0, controller.levels[strip.id] ?? 0) }
             let elapsed = ContinuousClock.now - begin
             guard elapsed >= .seconds(second + 1) else { continue }
             second += 1

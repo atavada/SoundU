@@ -137,4 +137,20 @@ final class SoundUControllerTests: XCTestCase {
         XCTAssertTrue(lingering, "strips: \(controller.apps)")
         XCTAssertNotNil(controller.engine.runningAggregates["speakers"], "still tapped while lingering")
     }
+
+    func testMeterLevelsPublishedPerApp() async throws {
+        let (controller, fake, _) = try makeController()
+        controller.start()
+        defer { controller.shutdown() }
+        let routed = await waitUntil(1) { self.strip(controller, self.spotifyID)?.state == .routed }
+        XCTAssertTrue(routed)
+        let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
+
+        // Keep audio flowing while polling: each meter tick consumes the peaks.
+        let metered = await waitUntil(1) {
+            _ = self.render(fake, agg, input: 0.5, cycles: 2)
+            return (controller.levels[self.spotifyID] ?? 0) > 0
+        }
+        XCTAssertTrue(metered, "levels: \(controller.levels)")
+    }
 }

@@ -76,6 +76,8 @@ public protocol AudioSystem: AnyObject, Sendable {
     func createAggregate(deviceUID: String, tapUIDs: [String]) throws -> AudioObjectID
     func setAggregateTaps(_ agg: AudioObjectID, tapUIDs: [String]) throws
     func destroyAggregate(_ agg: AudioObjectID)
+    /// Input streams of the aggregate: the physical device's own inputs, then one per tap.
+    func inputStreamCount(aggregate: AudioObjectID) -> Int
 
     func startIO(aggregate: AudioObjectID, block: @escaping AudioDeviceIOBlock) throws -> AudioDeviceIOProcID
     /// Stops and destroys the IOProc.

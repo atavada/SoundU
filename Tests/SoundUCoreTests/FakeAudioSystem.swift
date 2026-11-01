@@ -24,6 +24,8 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
     private var _calls: [Call] = []
     private var _failingTapNames: Set<String> = []
     private var _failingAggregateDeviceUIDs: Set<String> = []
+    private var _deviceInputStreams: [String: Int] = [:]
+    private var aggregateLayout: [AudioObjectID: (deviceUID: String, taps: Int)] = [:]
     private var _runningBundleIDs: Set<String> = []
     private var _noDuckSupported = true
     private var _noDuckSucceeds = true
@@ -58,6 +60,11 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
     var failingAggregateDeviceUIDs: Set<String> {
         get { locked { _failingAggregateDeviceUIDs } }
         set { locked { _failingAggregateDeviceUIDs = newValue } }
+    }
+    /// Device UID → the device's own input stream count (default 0).
+    var deviceInputStreams: [String: Int] {
+        get { locked { _deviceInputStreams } }
+        set { locked { _deviceInputStreams = newValue } }
     }
     var runningBundleIDs: Set<String> {
         get { locked { _runningBundleIDs } }
@@ -128,15 +135,32 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
             if _failingAggregateDeviceUIDs.contains(deviceUID) {
                 throw AudioSystemError("create aggregate on \(deviceUID)", kAudioHardwareBadDeviceError)
             }
-            return allocateID()
+            let agg = allocateID()
+            aggregateLayout[agg] = (deviceUID, tapUIDs.count)
+            return agg
         }
     }
 
     func setAggregateTaps(_ agg: AudioObjectID, tapUIDs: [String]) throws {
-        record(.setAggregateTaps(agg, tapUIDs: tapUIDs))
+        locked {
+            _calls.append(.setAggregateTaps(agg, tapUIDs: tapUIDs))
+            aggregateLayout[agg]?.taps = tapUIDs.count
+        }
     }
 
-    func destroyAggregate(_ agg: AudioObjectID) { record(.destroyAggregate(agg)) }
+    func destroyAggregate(_ agg: AudioObjectID) {
+        locked {
+            _calls.append(.destroyAggregate(agg))
+            aggregateLayout[agg] = nil
+        }
+    }
+
+    func inputStreamCount(aggregate: AudioObjectID) -> Int {
+        locked {
+            guard let layout = aggregateLayout[aggregate] else { return 0 }
+            return (_deviceInputStreams[layout.deviceUID] ?? 0) + layout.taps
+        }
+    }
 
     func startIO(aggregate: AudioObjectID, block: @escaping AudioDeviceIOBlock) throws -> AudioDeviceIOProcID {
         locked {

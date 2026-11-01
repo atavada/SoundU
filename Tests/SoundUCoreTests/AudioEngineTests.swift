@@ -137,6 +137,25 @@ final class AudioEngineTests: XCTestCase {
         XCTAssertEqual(render(fake, agg, inputs: [0.1, 0.3], cycles: 20), 0.25, accuracy: 1e-5)
     }
 
+    /// The physical device's own input streams come first in the aggregate's input buffers.
+    func testDeviceInputStreamsOffsetTapBuffers() throws {
+        let (engine, fake, _) = makeEngine()
+        fake.deviceInputStreams = ["speakers": 1]
+        engine.set(appID: "B", volume: 0.5, muted: false)
+        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2)]]))
+        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
+        // Buffer 0 is the microphone and must never be mixed: A = 0.1, B = 0.4 * 0.5.
+        XCTAssertEqual(render(fake, agg, inputs: [0.9, 0.1, 0.4]), 0.3, accuracy: 1e-6)
+
+        // After a tap-list change the offset still applies (C appended at buffer 3).
+        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2), spec("C", 3)]]))
+        XCTAssertEqual(render(fake, agg, inputs: [0.9, 0.1, 0.4, 0.05]), 0.35, accuracy: 1e-6)
+
+        // Removing A shifts B and C down; the mic stays out.
+        engine.apply(plan(["speakers": [spec("B", 2), spec("C", 3)]]))
+        XCTAssertEqual(render(fake, agg, inputs: [0.9, 0.4, 0.05]), 0.25, accuracy: 1e-6)
+    }
+
     func testTapFailureLeavesAppUntappedAndReports() throws {
         let (engine, fake, log) = makeEngine()
         fake.failingTapNames = [tapName("B")]

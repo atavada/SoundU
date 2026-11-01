@@ -99,17 +99,24 @@ public final class CoreAudioSystem: AudioSystem {
         ]
         var agg = AudioObjectID(kAudioObjectUnknown)
         try check(AudioHardwareCreateAggregateDevice(desc as CFDictionary, &agg), "create aggregate on \(deviceUID)")
-        if !tapUIDs.isEmpty { waitForInputStreams(agg) }
+        if !tapUIDs.isEmpty { waitForInputStreams(agg, tapCount: tapUIDs.count) }
         return agg
     }
 
-    /// Tap input streams appear asynchronously; poll up to 3 s in 10 ms steps.
-    private func waitForInputStreams(_ agg: AudioObjectID) {
+    /// Tap input streams appear asynchronously; poll up to 3 s in 10 ms steps until the
+    /// aggregate has the sub-devices' own input streams plus one per tap.
+    private func waitForInputStreams(_ agg: AudioObjectID, tapCount: Int) {
+        let own = HAL.objectIDs(agg, kAudioAggregateDevicePropertyActiveSubDeviceList)
+            .reduce(0) { $0 + HAL.objectIDs($1, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput).count }
         for _ in 0..<300 {
-            if !HAL.objectIDs(agg, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput).isEmpty { return }
+            if inputStreamCount(aggregate: agg) == own + tapCount { return }
             usleep(10_000)
         }
-        Self.log.error("aggregate \(agg) has no input streams after 3 s")
+        Self.log.error("aggregate \(agg) has \(self.inputStreamCount(aggregate: agg)) input streams after 3 s, expected \(own + tapCount)")
+    }
+
+    public func inputStreamCount(aggregate: AudioObjectID) -> Int {
+        HAL.objectIDs(aggregate, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput).count
     }
 
     public func setAggregateTaps(_ agg: AudioObjectID, tapUIDs: [String]) throws {
@@ -119,6 +126,7 @@ public final class CoreAudioSystem: AudioSystem {
             AudioObjectSetPropertyData(agg, &addr, 0, nil, UInt32(MemoryLayout<CFArray>.size), $0)
         }
         try check(status, "set tap list on aggregate \(agg)")
+        waitForInputStreams(agg, tapCount: tapUIDs.count)
         // Sub-taps added via the property start without drift compensation.
         for subTap in HAL.objectIDs(agg, kAudioAggregateDevicePropertySubTapList) {
             logIfError(HAL.setUInt32(subTap, kAudioSubTapPropertyDriftCompensation, kAudioObjectPropertyScopeGlobal,
@@ -134,9 +142,8 @@ public final class CoreAudioSystem: AudioSystem {
     // MARK: - IO
 
     public func startIO(aggregate: AudioObjectID, block: @escaping AudioDeviceIOBlock) throws -> AudioDeviceIOProcID {
-        let queue = DispatchQueue(label: "com.example.SoundU.io.\(aggregate)", qos: .userInteractive)
         var proc: AudioDeviceIOProcID?
-        try check(AudioDeviceCreateIOProcIDWithBlock(&proc, aggregate, queue, block), "create IOProc on \(aggregate)")
+        try check(AudioDeviceCreateIOProcIDWithBlock(&proc, aggregate, nil, block), "create IOProc on \(aggregate)")
         guard let proc else { throw AudioSystemError("create IOProc on \(aggregate)", kAudioHardwareUnspecifiedError) }
         let status = AudioDeviceStart(aggregate, proc)
         if status != noErr {

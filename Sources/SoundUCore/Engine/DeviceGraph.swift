@@ -4,8 +4,9 @@ import Foundation
 import os
 
 /// The live audio graph for one output device: process taps, one private aggregate
-/// (the device plus the taps) and an IOProc that runs the C mixer. Tap order in the
-/// aggregate is the input buffer index each mixer slot reads.
+/// (the device plus the taps) and an IOProc that runs the C mixer. The aggregate's input
+/// buffers are the physical device's own input streams (if any) followed by one per tap,
+/// in tap-list order: tap i is read from input buffer `base + i`.
 ///
 /// Not thread-safe; owned by `AudioEngine`. Only the IOProc block runs on the IO thread,
 /// and it touches nothing but `state` and `counter`.
@@ -32,6 +33,8 @@ final class DeviceGraph {
     private let state: UnsafeMutablePointer<SUMixState>
     private let counter: UnsafeMutablePointer<SUCounter>
     private var proc: AudioDeviceIOProcID?
+    /// Input buffers before the first tap's (the physical device's own input streams).
+    private var base = 0
     /// Deactivated slots and the callback count at deactivation; reusable once IO moved on.
     private var retired: [(slot: UInt32, count: UInt64)] = []
 
@@ -74,7 +77,8 @@ final class DeviceGraph {
 
         let graph = DeviceGraph(system: system, deviceUID: deviceUID, deviceID: device?.id ?? AudioObjectID(kAudioObjectUnknown),
                                 aggregate: aggregate, sampleRate: device?.sampleRate ?? 48_000, taps: taps)
-        for (index, tap) in taps.enumerated() { graph.configure(tap, index: index, gains: gains) }
+        graph.base = graph.currentBase(tapCount: taps.count)
+        for (index, tap) in taps.enumerated() { graph.configure(tap, buffer: graph.base + index, gains: gains) }
         do {
             graph.proc = try system.startIO(aggregate: aggregate,
                                            block: makeIOBlock(state: graph.state, counter: graph.counter))
@@ -185,6 +189,21 @@ final class DeviceGraph {
             }
         }
 
+        // If the device's own input stream count changed, every tap's buffer moved: give the
+        // remaining kept taps fresh slots too (a live slot's buffer index cannot be changed).
+        let newBase = currentBase(tapCount: final.count)
+        if newBase != base {
+            for i in final.indices where !fresh.contains(final[i].appID) {
+                guard !free.isEmpty else {
+                    Self.log.error("no free mixer slot to move \(final[i].appID, privacy: .public) to its new buffer")
+                    continue
+                }
+                final[i].slot = free.removeFirst()
+                fresh.insert(final[i].appID)
+            }
+            base = newBase
+        }
+
         // Retire slots no longer used at the same index, then configure fresh ones.
         let keptSlots = Set(final.filter { !fresh.contains($0.appID) }.map(\.slot))
         let count = callbackCount
@@ -193,7 +212,7 @@ final class DeviceGraph {
             retired.append((tap.slot, count))
         }
         for (index, tap) in final.enumerated() where fresh.contains(tap.appID) {
-            configure(tap, index: index, gains: gains)
+            configure(tap, buffer: base + index, gains: gains)
         }
         for tap in taps where !finalUIDs.contains(tap.uid) { system.destroyTap(tap.tapID) }
         for tap in created where !finalUIDs.contains(tap.uid) { system.destroyTap(tap.tapID) }
@@ -210,9 +229,13 @@ final class DeviceGraph {
         return (0..<UInt32(SU_MAX_SLOTS)).filter { !busy.contains($0) }
     }
 
-    private func configure(_ tap: Tap, index: Int, gains: Gains) {
+    private func configure(_ tap: Tap, buffer: Int, gains: Gains) {
         let (volume, muted) = gains(tap.appID)
-        su_slot_configure(state, tap.slot, UInt32(index), volume, muted ? 1 : 0)
+        su_slot_configure(state, tap.slot, UInt32(buffer), volume, muted ? 1 : 0)
+    }
+
+    private func currentBase(tapCount: Int) -> Int {
+        max(0, system.inputStreamCount(aggregate: aggregate) - tapCount)
     }
 
     // MARK: - Per-app controls (atomics only)

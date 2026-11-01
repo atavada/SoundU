@@ -5,7 +5,7 @@ import os
 public final class SettingsStore: Sendable {
     public let url: URL
 
-    private static let logger = Logger(subsystem: "com.example.SoundU", category: "settings")
+    private static let logger = Logger(subsystem: "io.github.atavada.SoundU", category: "settings")
 
     public init(url: URL) {
         self.url = url

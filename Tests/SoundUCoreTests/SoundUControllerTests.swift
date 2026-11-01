@@ -42,7 +42,7 @@ final class SoundUControllerTests: XCTestCase {
         try store.save(settings)
         let apps = [spotify]
         let controller = SoundUController(system: fake, store: store, runningApps: { apps },
-                                          selfBundleID: "com.example.SoundU", ioTimeout: ioTimeout)
+                                          selfBundleID: "io.github.atavada.SoundU", ioTimeout: ioTimeout)
         return (controller, fake, store)
     }
 

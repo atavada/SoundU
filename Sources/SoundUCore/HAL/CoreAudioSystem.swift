@@ -4,7 +4,7 @@ import os
 
 /// Live `AudioSystem` over the Core Audio HAL. Stateless; safe to share across threads.
 public final class CoreAudioSystem: AudioSystem {
-    private static let log = Logger(subsystem: "com.example.SoundU", category: "HAL")
+    private static let log = Logger(subsystem: "io.github.atavada.SoundU", category: "HAL")
     private static let system = AudioObjectID(kAudioObjectSystemObject)
     /// Our own private aggregates; hidden from `outputDevices()`.
     static let aggregateUIDPrefix = "SoundU-Agg-"
@@ -254,7 +254,7 @@ private final class HALObservation: @unchecked Sendable {
     private static let processSelectors = [kAudioProcessPropertyIsRunning, kAudioProcessPropertyIsRunningOutput,
                                            kAudioProcessPropertyIsRunningInput]
 
-    private let queue = DispatchQueue(label: "com.example.SoundU.hal-observer")
+    private let queue = DispatchQueue(label: "io.github.atavada.SoundU.hal-observer")
     private let systemListeners: [(AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)]
     private let processListener: AudioObjectPropertyListenerBlock
     private let lock = NSLock()

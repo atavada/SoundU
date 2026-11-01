@@ -110,14 +110,14 @@ public final class SoundUController {
     /// Clock for call and linger timing; replaceable in tests.
     @ObservationIgnored var now: () -> Date = Date.init
 
-    private static let log = Logger(subsystem: "com.example.SoundU", category: "Controller")
+    private static let log = Logger(subsystem: "io.github.atavada.SoundU", category: "Controller")
     private static let saveDelay: Duration = .milliseconds(500)
     private static let replanInterval: Duration = .seconds(1)
     private static let meterInterval: Duration = .seconds(1.0 / 30)
 
     public convenience init(system: AudioSystem = CoreAudioSystem(), store: SettingsStore = .standard) {
         self.init(system: system, store: store, runningApps: ProcessMonitor.workspaceApps,
-                  selfBundleID: Bundle.main.bundleIdentifier ?? "com.example.SoundU",
+                  selfBundleID: Bundle.main.bundleIdentifier ?? "io.github.atavada.SoundU",
                   ioTimeout: .seconds(2))
     }
 

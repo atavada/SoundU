@@ -11,7 +11,7 @@ final class RoutingPlannerTests: XCTestCase {
                                         sampleRate: 48_000, outputChannels: 2, transport: 0)
     private let airPods = OutputDevice(id: 20, uid: "airpods", name: "AirPods",
                                        sampleRate: 48_000, outputChannels: 2, transport: 0)
-    private let selfID = "com.example.SoundU"
+    private let selfID = "io.github.atavada.SoundU"
 
     private func proc(_ objectID: AudioObjectID, output: Bool = true) -> ProcessSnapshot {
         ProcessSnapshot(objectID: objectID, pid: pid_t(objectID) + 1000, bundleID: nil,

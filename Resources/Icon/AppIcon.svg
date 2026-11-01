@@ -1,32 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <!-- SoundU app icon master: a U made of two fader slots joined at the bottom, two amber knobs. -->
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#5B3DF5"/>
-      <stop offset="1" stop-color="#1FC8B4"/>
-    </linearGradient>
-    <radialGradient id="shadow" cx="0.5" cy="0.5" r="0.5">
-      <stop offset="0.55" stop-color="#000000" stop-opacity="0.35"/>
-      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="knob" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFC871"/>
-      <stop offset="1" stop-color="#FFA526"/>
-    </linearGradient>
-  </defs>
+  <!-- SoundU app icon master: a U made of two fader slots joined at the bottom, two amber knobs.
+       Flat colours only: solid blue background, white U, solid amber knobs. -->
   <!-- macOS rounded square on the 1024 grid (824 pt body, 100 pt margin). -->
-  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="#2563EB"/>
   <!-- The U: two vertical fader slots joined at the bottom. -->
   <path d="M 357 270 V 590 A 155 155 0 0 0 667 590 V 270"
-        fill="none" stroke="#FFFFFF" stroke-opacity="0.9" stroke-width="120" stroke-linecap="round"/>
+        fill="none" stroke="#FFFFFF" stroke-width="120" stroke-linecap="round"/>
   <!-- Fader grooves inside each slot. -->
-  <path d="M 357 290 V 600" stroke="#3B2BA8" stroke-opacity="0.4" stroke-width="26" stroke-linecap="round"/>
-  <path d="M 667 290 V 600" stroke="#3B2BA8" stroke-opacity="0.4" stroke-width="26" stroke-linecap="round"/>
-  <!-- Knobs at different heights, each with a soft shadow below. -->
-  <circle cx="357" cy="400" r="112" fill="url(#shadow)"/>
-  <circle cx="357" cy="378" r="84" fill="url(#knob)"/>
-  <ellipse cx="357" cy="335" rx="46" ry="22" fill="#FFFFFF" fill-opacity="0.35"/>
-  <circle cx="667" cy="562" r="112" fill="url(#shadow)"/>
-  <circle cx="667" cy="540" r="84" fill="url(#knob)"/>
-  <ellipse cx="667" cy="497" rx="46" ry="22" fill="#FFFFFF" fill-opacity="0.35"/>
+  <path d="M 357 290 V 600" stroke="#1E40AF" stroke-opacity="0.45" stroke-width="26" stroke-linecap="round"/>
+  <path d="M 667 290 V 600" stroke="#1E40AF" stroke-opacity="0.45" stroke-width="26" stroke-linecap="round"/>
+  <!-- Knobs at different heights, each with a flat offset shadow. -->
+  <circle cx="357" cy="392" r="84" fill="#1E3A8A" fill-opacity="0.35"/>
+  <circle cx="357" cy="378" r="84" fill="#FFB547"/>
+  <circle cx="667" cy="554" r="84" fill="#1E3A8A" fill-opacity="0.35"/>
+  <circle cx="667" cy="540" r="84" fill="#FFB547"/>
 </svg>

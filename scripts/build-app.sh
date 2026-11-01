@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "${0:a:h}/.."
 
-bundle_id=com.example.SoundU
+bundle_id=io.github.atavada.SoundU
 config=debug
 install=0
 for arg in "$@"; do

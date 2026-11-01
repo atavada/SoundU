@@ -1,7 +1,5 @@
 .build/
 build/
-SoundSource.app/
-/Contents/
 .DS_Store
 *.xcuserstate
 .superpowers/

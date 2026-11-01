@@ -22,7 +22,7 @@ final class DeviceGraph {
     }
 
     typealias Failure = (appID: String, error: String)
-    private static let log = Logger(subsystem: "com.example.SoundU", category: "Engine")
+    private static let log = Logger(subsystem: "io.github.atavada.SoundU", category: "Engine")
     /// Volume and mute for an app, used when its slot is configured.
     typealias Gains = (String) -> (volume: Float, muted: Bool)
 

@@ -5,7 +5,7 @@ import os
 import ServiceManagement
 
 enum LaunchAtLogin {
-    private static let log = Logger(subsystem: "com.example.SoundU", category: "LaunchAtLogin")
+    private static let log = Logger(subsystem: "io.github.atavada.SoundU", category: "LaunchAtLogin")
 
     /// Whether SoundU is registered to open at login. `.requiresApproval` counts as on: the
     /// item is registered and only waits for the user to allow it in System Settings.

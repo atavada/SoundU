@@ -51,7 +51,7 @@ public final class AudioEngine {
         _ = HAL.audioDeviceDuck()?(device, exempt ? 0.9999999 : 1.0, nil, 0)
     }
 
-    private static let log = Logger(subsystem: "com.example.SoundU", category: "Engine")
+    private static let log = Logger(subsystem: "io.github.atavada.SoundU", category: "Engine")
     private let system: AudioSystem
     private let bufferFrames: UInt32
     private let ioTimeout: Duration

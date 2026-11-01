@@ -11,7 +11,7 @@ public final class ProcessMonitor: @unchecked Sendable {
 
     private let system: AudioSystem
     private let runningApps: @Sendable () -> [RunningApp]
-    private let queue = DispatchQueue(label: "com.example.SoundU.ProcessMonitor")
+    private let queue = DispatchQueue(label: "io.github.atavada.SoundU.ProcessMonitor")
     private let lock = NSLock()
     private var grouping = Grouping()
     private var _onChange: (@Sendable (Grouping) -> Void)?

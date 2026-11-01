@@ -51,8 +51,8 @@ public final class SoundUController {
     public private(set) var devices: [OutputDevice] = []
     public private(set) var defaultDeviceUID: String?
     public private(set) var permission: PermissionState = .unknown
-    /// Latest meter peak per app ID, 0...1, updated at 30 Hz. Kept apart from `apps` so meter
-    /// updates only redraw the views that read them.
+    /// Latest meter peak per app ID, 0...1, updated at 30 Hz while metering is on (the panel is
+    /// open). Kept apart from `apps` so meter updates only redraw the views that read them.
     public private(set) var levels: [String: Float] = [:]
 
     /// Global preferences the Settings window edits; mirrors `settings.global` so views observe
@@ -78,6 +78,7 @@ public final class SoundUController {
     @ObservationIgnored private var icons: [String: NSImage] = [:]
     @ObservationIgnored private var observation: AnyObject?
     @ObservationIgnored private var loops: [Task<Void, Never>] = []
+    @ObservationIgnored private var meterLoop: Task<Void, Never>?
     @ObservationIgnored private var pendingSave: Task<Void, Never>?
     /// Whether `AudioDeviceDuck` resolves; replaceable in tests.
     @ObservationIgnored var duckFallbackAvailable: () -> Bool = { HAL.audioDeviceDuck() != nil }
@@ -136,10 +137,7 @@ public final class SoundUController {
         defaultDeviceUID = system.defaultOutputDeviceUID()
         replan()
 
-        loops = [
-            repeating(every: Self.replanInterval) { $0.replan() },
-            repeating(every: Self.meterInterval) { $0.updateLevels() },
-        ]
+        loops = [repeating(every: Self.replanInterval) { $0.replan() }]
     }
 
     /// Saves settings, then stops every graph (apps play directly again). For tests and the
@@ -157,6 +155,7 @@ public final class SoundUController {
         save()
         loops.forEach { $0.cancel() }
         loops = []
+        setMetering(false)
         monitor.onChange = nil
         observation = nil
         engine.onEvent = nil
@@ -403,6 +402,18 @@ public final class SoundUController {
     }
 
     // MARK: - Meters
+
+    /// Runs the 30 Hz meter loop while the panel is open; off clears the levels.
+    public func setMetering(_ on: Bool) {
+        guard on != (meterLoop != nil) else { return }
+        if on {
+            meterLoop = repeating(every: Self.meterInterval) { $0.updateLevels() }
+        } else {
+            meterLoop?.cancel()
+            meterLoop = nil
+            if !levels.isEmpty { levels = [:] }
+        }
+    }
 
     private func updateLevels() {
         let metered = apps.filter { $0.state == .routed || $0.state == .lingering }.map(\.id)

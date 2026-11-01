@@ -38,6 +38,7 @@ enum Headless {
         defer { signals.forEach { $0.cancel() } }
 
         controller.start()
+        controller.setMetering(true) // no panel here; levels are printed
         print("START pid=\(getpid()) script=\(script) target=\(target ?? "all routed")")
 
         var steps: [(at: Int, name: String, apply: (String) -> Void)] = script ? [

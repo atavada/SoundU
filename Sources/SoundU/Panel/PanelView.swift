@@ -24,8 +24,14 @@ struct PanelView: View {
         }
         .frame(width: 460, height: 340)
         .background(.ultraThinMaterial)
-        .onAppear { scroll.install() }
-        .onDisappear { scroll.remove() }
+        .onAppear {
+            scroll.install()
+            controller.setMetering(true)
+        }
+        .onDisappear {
+            scroll.remove()
+            controller.setMetering(false) // no 30 Hz work while the panel is closed
+        }
     }
 
     private var header: some View {

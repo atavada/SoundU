@@ -147,12 +147,24 @@ final class SoundUControllerTests: XCTestCase {
         XCTAssertTrue(routed)
         let agg = try XCTUnwrap(controller.engine.runningAggregates["speakers"])
 
+        // Panel closed: no meter loop.
+        _ = render(fake, agg, input: 0.5, cycles: 2)
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(controller.levels, [:], "meters paused while the panel is closed")
+
+        controller.setMetering(true)
         // Keep audio flowing while polling: each meter tick consumes the peaks.
         let metered = await waitUntil(1) {
             _ = self.render(fake, agg, input: 0.5, cycles: 2)
             return (controller.levels[self.spotifyID] ?? 0) > 0
         }
         XCTAssertTrue(metered, "levels: \(controller.levels)")
+
+        controller.setMetering(false)
+        XCTAssertEqual(controller.levels, [:], "cleared when the panel closes")
+        _ = render(fake, agg, input: 0.5, cycles: 2)
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(controller.levels, [:])
     }
 
     func testPrepareForTerminationSavesNowWithoutTeardown() async throws {

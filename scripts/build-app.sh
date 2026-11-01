@@ -2,8 +2,9 @@
 # Builds build/SoundU.app (universal arm64 + x86_64).
 # Usage: scripts/build-app.sh [--release] [--install]
 # Signs ad-hoc with the hardened runtime unless SOUNDU_SIGN_IDENTITY is set.
-# --install quits a running SoundU and copies the bundle to /Applications/SoundU.app, replacing
-# an existing copy only when it is a SoundU bundle (launch at login needs /Applications).
+# --install implies --release; it quits a running SoundU and copies the bundle to
+# /Applications/SoundU.app, replacing an existing copy only when it is a SoundU bundle
+# (launch at login needs /Applications).
 set -euo pipefail
 cd "${0:a:h}/.."
 
@@ -13,7 +14,7 @@ install=0
 for arg in "$@"; do
     case "$arg" in
         --release) config=release ;;
-        --install) install=1 ;;
+        --install) install=1; config=release ;;
         *) echo "usage: $0 [--release] [--install]" >&2; exit 2 ;;
     esac
 done

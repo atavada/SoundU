@@ -79,7 +79,13 @@ public protocol AudioSystem: AnyObject, Sendable {
     /// Input streams of the aggregate: the physical device's own inputs, then one per tap.
     func inputStreamCount(aggregate: AudioObjectID) -> Int
 
-    func startIO(aggregate: AudioObjectID, block: @escaping AudioDeviceIOBlock) throws -> AudioDeviceIOProcID
+    /// Creates the IOProc, applies `inputStreamUsage` (see `setInputStreamUsage`; nil leaves every
+    /// input stream on), then starts IO.
+    func startIO(aggregate: AudioObjectID, inputStreamUsage: [Bool]?,
+                 block: @escaping AudioDeviceIOBlock) throws -> AudioDeviceIOProcID
+    /// Which of the aggregate's input streams `proc` uses (one flag per input stream, in order);
+    /// an unused stream is never opened and reaches the IOProc as a NULL buffer. Failures are logged.
+    func setInputStreamUsage(aggregate: AudioObjectID, proc: AudioDeviceIOProcID, _ usage: [Bool])
     /// Stops and destroys the IOProc.
     func stopIO(aggregate: AudioObjectID, proc: AudioDeviceIOProcID)
 

@@ -12,6 +12,8 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
         case setAggregateTaps(AudioObjectID, tapUIDs: [String])
         case destroyAggregate(AudioObjectID)
         case startIO(aggregate: AudioObjectID)
+        /// Input-scope IOProc stream usage: one flag per aggregate input stream.
+        case setInputStreamUsage(AudioObjectID, [Bool])
         case stopIO(aggregate: AudioObjectID)
         case setNoDuck(AudioObjectID, Bool)
         case setBufferFrameSize(AudioObjectID, UInt32)
@@ -178,13 +180,19 @@ final class FakeAudioSystem: AudioSystem, @unchecked Sendable {
         }
     }
 
-    func startIO(aggregate: AudioObjectID, block: @escaping AudioDeviceIOBlock) throws -> AudioDeviceIOProcID {
+    func startIO(aggregate: AudioObjectID, inputStreamUsage: [Bool]?,
+                 block: @escaping AudioDeviceIOBlock) throws -> AudioDeviceIOProcID {
         locked {
+            if let inputStreamUsage { _calls.append(.setInputStreamUsage(aggregate, inputStreamUsage)) }
             _calls.append(.startIO(aggregate: aggregate))
             let key = UInt(allocateID())
             ioBlocks[key] = (aggregate, block)
             return unsafeBitCast(UnsafeRawPointer(bitPattern: key)!, to: AudioDeviceIOProcID.self)
         }
+    }
+
+    func setInputStreamUsage(aggregate: AudioObjectID, proc: AudioDeviceIOProcID, _ usage: [Bool]) {
+        record(.setInputStreamUsage(aggregate, usage))
     }
 
     func stopIO(aggregate: AudioObjectID, proc: AudioDeviceIOProcID) {

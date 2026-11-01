@@ -197,6 +197,26 @@ final class AudioEngineTests: XCTestCase {
         XCTAssertEqual(render(fake, agg, inputs: [0.9, 0.4, 0.05]), 0.25, accuracy: 1e-6)
     }
 
+    /// Finding 7: the device's own input streams (a headset mic) are switched off for our
+    /// IOProc before IO starts and after every tap-list change; only tap streams stay on.
+    func testDeviceInputStreamsAreDisabledForTheIOProc() throws {
+        let (engine, fake, _) = makeEngine()
+        fake.deviceInputStreams = ["speakers": 2]
+        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2)]]))
+        let agg = try XCTUnwrap(engine.runningAggregates["speakers"])
+        XCTAssertEqual(Array(fake.calls.suffix(2)),
+                       [.setInputStreamUsage(agg, [false, false, true, true]), .startIO(aggregate: agg)])
+
+        engine.apply(plan(["speakers": [spec("A", 1), spec("B", 2), spec("C", 3)]]))
+        XCTAssertEqual(fake.calls.last { if case .setInputStreamUsage = $0 { true } else { false } },
+                       .setInputStreamUsage(agg, [false, false, true, true, true]))
+
+        // A device with no input streams: nothing to disable, no usage call.
+        engine.apply(plan(["airpods": [spec("D", 4)]]))
+        let aggA = try XCTUnwrap(engine.runningAggregates["airpods"])
+        XCTAssertFalse(fake.calls.contains { if case .setInputStreamUsage(aggA, _) = $0 { true } else { false } })
+    }
+
     func testTapFailureLeavesAppUntappedAndReports() throws {
         let (engine, fake, log) = makeEngine()
         fake.failingTapNames = [tapName("B")]

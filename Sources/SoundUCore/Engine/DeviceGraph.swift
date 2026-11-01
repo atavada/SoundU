@@ -6,7 +6,8 @@ import os
 /// The live audio graph for one output device: process taps, one private aggregate
 /// (the device plus the taps) and an IOProc that runs the C mixer. The aggregate's input
 /// buffers are the physical device's own input streams (if any) followed by one per tap,
-/// in tap-list order: tap i is read from input buffer `base + i`.
+/// in tap-list order: tap i is read from input buffer `base + i`. The device's own input
+/// streams are switched off for the IOProc (IOProcStreamUsage), so its microphone is never opened.
 ///
 /// Not thread-safe; owned by `AudioEngine`. Only the IOProc block runs on the IO thread,
 /// and it touches nothing but `state` and `counter`.
@@ -81,6 +82,7 @@ final class DeviceGraph {
         for (index, tap) in taps.enumerated() { graph.configure(tap, buffer: graph.base + index, gains: gains) }
         do {
             graph.proc = try system.startIO(aggregate: aggregate,
+                                           inputStreamUsage: graph.inputStreamUsage(tapCount: taps.count),
                                            block: makeIOBlock(state: graph.state, counter: graph.counter))
         } catch {
             graph.teardown()
@@ -188,7 +190,9 @@ final class DeviceGraph {
         let keptSlots = Set(final.filter { !fresh.contains($0.appID) }.map(\.slot))
         retire(taps.map(\.slot).filter { !keptSlots.contains($0) })
 
-        if final.map(\.uid) != taps.map(\.uid) {
+        let oldBase = base
+        let listChanged = final.map(\.uid) != taps.map(\.uid)
+        if listChanged {
             do {
                 try system.setAggregateTaps(aggregate, tapUIDs: final.map(\.uid))
             } catch {
@@ -213,6 +217,11 @@ final class DeviceGraph {
             }
             retire(moved)
             base = newBase
+        }
+        // The stream layout changed: keep the device's own input streams off for our IOProc.
+        if listChanged || base != oldBase, base > 0 || oldBase > 0, let proc {
+            let usage = inputStreamUsage(tapCount: final.count) ?? Array(repeating: true, count: final.count)
+            system.setInputStreamUsage(aggregate: aggregate, proc: proc, usage)
         }
 
         for (index, tap) in final.enumerated() where fresh.contains(tap.appID) {
@@ -245,6 +254,12 @@ final class DeviceGraph {
     private func configure(_ tap: Tap, buffer: Int, gains: Gains) {
         let (volume, muted) = gains(tap.appID)
         su_slot_configure(state, tap.slot, UInt32(buffer), volume, muted ? 1 : 0)
+    }
+
+    /// Input streams our IOProc uses: the device's own (the microphone, if any) off, taps on.
+    /// Nil when the device has no input streams (all on, the default).
+    private func inputStreamUsage(tapCount: Int) -> [Bool]? {
+        base > 0 ? Array(repeating: false, count: base) + Array(repeating: true, count: tapCount) : nil
     }
 
     private func currentBase(tapCount: Int) -> Int {

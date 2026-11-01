@@ -103,16 +103,20 @@ public final class CoreAudioSystem: AudioSystem {
         return agg
     }
 
-    /// Tap input streams appear asynchronously; poll up to 3 s in 10 ms steps until the
-    /// aggregate has the sub-devices' own input streams plus one per tap.
+    /// Tap input streams appear asynchronously; poll in 10 ms steps, for at most 3 s in total,
+    /// until the aggregate has the sub-devices' own input streams (re-read each step, as they
+    /// can appear late too) plus one per tap.
     private func waitForInputStreams(_ agg: AudioObjectID, tapCount: Int) {
-        let own = HAL.objectIDs(agg, kAudioAggregateDevicePropertyActiveSubDeviceList)
-            .reduce(0) { $0 + HAL.objectIDs($1, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput).count }
-        for _ in 0..<300 {
-            if inputStreamCount(aggregate: agg) == own + tapCount { return }
+        let deadline = ContinuousClock.now + .seconds(3)
+        var expected = 0
+        repeat {
+            let own = HAL.objectIDs(agg, kAudioAggregateDevicePropertyActiveSubDeviceList)
+                .reduce(0) { $0 + HAL.objectIDs($1, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput).count }
+            expected = own + tapCount
+            if inputStreamCount(aggregate: agg) == expected { return }
             usleep(10_000)
-        }
-        Self.log.error("aggregate \(agg) has \(self.inputStreamCount(aggregate: agg)) input streams after 3 s, expected \(own + tapCount)")
+        } while ContinuousClock.now < deadline
+        Self.log.error("aggregate \(agg) has \(self.inputStreamCount(aggregate: agg)) input streams after 3 s, expected \(expected)")
     }
 
     public func inputStreamCount(aggregate: AudioObjectID) -> Int {
@@ -141,16 +145,40 @@ public final class CoreAudioSystem: AudioSystem {
 
     // MARK: - IO
 
-    public func startIO(aggregate: AudioObjectID, block: @escaping AudioDeviceIOBlock) throws -> AudioDeviceIOProcID {
+    public func startIO(aggregate: AudioObjectID, inputStreamUsage: [Bool]?,
+                        block: @escaping AudioDeviceIOBlock) throws -> AudioDeviceIOProcID {
         var proc: AudioDeviceIOProcID?
         try check(AudioDeviceCreateIOProcIDWithBlock(&proc, aggregate, nil, block), "create IOProc on \(aggregate)")
         guard let proc else { throw AudioSystemError("create IOProc on \(aggregate)", kAudioHardwareUnspecifiedError) }
+        // Before start, so streams marked unused (the device's microphone) are never opened.
+        if let inputStreamUsage { setInputStreamUsage(aggregate: aggregate, proc: proc, inputStreamUsage) }
         let status = AudioDeviceStart(aggregate, proc)
         if status != noErr {
             AudioDeviceDestroyIOProcID(aggregate, proc)
             throw AudioSystemError("start IO on \(aggregate)", status)
         }
         return proc
+    }
+
+    /// `kAudioDevicePropertyIOProcStreamUsage`, input scope: an `AudioHardwareIOProcStreamUsage`
+    /// (variable length: `mStreamIsOn` holds one UInt32 per input stream of the device).
+    public func setInputStreamUsage(aggregate: AudioObjectID, proc: AudioDeviceIOProcID, _ usage: [Bool]) {
+        typealias Usage = AudioHardwareIOProcStreamUsage
+        let flagsOffset = MemoryLayout<Usage>.offset(of: \Usage.mStreamIsOn)!
+        let size = max(MemoryLayout<Usage>.size, flagsOffset + usage.count * MemoryLayout<UInt32>.stride)
+        let raw = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: MemoryLayout<Usage>.alignment)
+        defer { raw.deallocate() }
+        raw.initializeMemory(as: UInt8.self, repeating: 0, count: size)
+        raw.storeBytes(of: unsafeBitCast(proc, to: UnsafeMutableRawPointer.self),
+                       toByteOffset: MemoryLayout<Usage>.offset(of: \Usage.mIOProc)!, as: UnsafeMutableRawPointer.self)
+        raw.storeBytes(of: UInt32(usage.count), toByteOffset: MemoryLayout<Usage>.offset(of: \Usage.mNumberStreams)!,
+                       as: UInt32.self)
+        for (i, on) in usage.enumerated() {
+            raw.storeBytes(of: on ? 1 : 0, toByteOffset: flagsOffset + i * MemoryLayout<UInt32>.stride, as: UInt32.self)
+        }
+        var addr = HAL.address(kAudioDevicePropertyIOProcStreamUsage, kAudioObjectPropertyScopeInput)
+        logIfError(AudioObjectSetPropertyData(aggregate, &addr, 0, nil, UInt32(size), raw),
+                   "set input stream usage \(usage.map { $0 ? 1 : 0 }) on \(aggregate)")
     }
 
     public func stopIO(aggregate: AudioObjectID, proc: AudioDeviceIOProcID) {
